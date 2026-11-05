@@ -1,12 +1,14 @@
 import { FormattedTimestamp } from '@/components/FormattedTimestamp'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import UserAvatar, { SimpleUserAvatar } from '@/components/UserAvatar'
+import UserAvatar, { SimpleUserAvatar, UserAvatarSkeleton } from '@/components/UserAvatar'
 import Username, { SimpleUsername } from '@/components/Username'
-import { isMentioningMutedUsers } from '@/lib/event'
+import { getEventFeedTimestamp, isMentioningMutedUsers } from '@/lib/event'
 import { toNote, toUserAggregationDetail } from '@/lib/link'
+import { isRelayDisconnectReason } from '@/lib/relay'
 import { mergeTimelines } from '@/lib/timeline'
-import { cn, isTouchDevice } from '@/lib/utils'
+import { canHover } from '@/lib/device'
+import { cn } from '@/lib/utils'
 import { useSecondaryPage } from '@/PageManager'
 import { useContentPolicy } from '@/providers/ContentPolicyProvider'
 import { useDeletedEvent } from '@/providers/DeletedEventProvider'
@@ -32,7 +34,7 @@ import {
   useState
 } from 'react'
 import { useTranslation } from 'react-i18next'
-import PullToRefresh from 'react-simple-pull-to-refresh'
+import PullToRefresh from '../PullToRefresh'
 import { toast } from 'sonner'
 import { LoadingBar } from '../LoadingBar'
 import NewNotesButton from '../NewNotesButton'
@@ -92,7 +94,6 @@ const UserAggregationList = forwardRef<
     const [refreshCount, setRefreshCount] = useState(0)
     const [showCount, setShowCount] = useState(SHOW_COUNT)
     const [hasMore, setHasMore] = useState(true)
-    const supportTouch = useMemo(() => isTouchDevice(), [])
     const feedId = useMemo(() => {
       return userAggregationService.getFeedId(subRequests, showKinds)
     }, [JSON.stringify(subRequests), JSON.stringify(showKinds)])
@@ -201,18 +202,7 @@ const UserAggregationList = forwardRef<
             },
             onClose: (url, reason) => {
               if (!showRelayCloseReason) return
-              // ignore reasons from nostr-tools
-              if (
-                [
-                  'closed by caller',
-                  'relay connection errored',
-                  'relay connection closed',
-                  'pingpong timed out',
-                  'relay connection closed by us'
-                ].includes(reason)
-              ) {
-                return
-              }
+              if (isRelayDisconnectReason(reason)) return
 
               toast.error(`${url}: ${reason}`)
             }
@@ -274,7 +264,7 @@ const UserAggregationList = forwardRef<
         const results = await Promise.allSettled(
           events.map(async (evt) => {
             if (evt.pubkey === currentPubkey) return null
-            if (evt.created_at < since) return null
+            if (getEventFeedTimestamp(evt) < since) return null
             if (isEventDeleted(evt)) return null
             if (filterMutedNotes && mutePubkeySet.has(evt.pubkey)) return null
             if (
@@ -306,7 +296,8 @@ const UserAggregationList = forwardRef<
         hideContentMentioningMutedUsers,
         isMentioningMutedUsers,
         meetsMinTrustScore,
-        trustScoreThreshold
+        trustScoreThreshold,
+        since
       ]
     )
 
@@ -464,7 +455,7 @@ const UserAggregationList = forwardRef<
       <div>
         <div ref={topRef} className="scroll-mt-[calc(6rem+1px)]" />
         {showLoadingBar && <LoadingBar />}
-        <div className="flex h-12 items-center justify-between gap-2 border-b pl-4 pr-1">
+        <div className="flex h-12 items-center justify-between gap-2 border-b ps-4 pe-1">
           <div className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
             <span className="font-medium text-foreground">
               {lastXDays === 1
@@ -486,19 +477,14 @@ const UserAggregationList = forwardRef<
             {t('Load earlier')}
           </Button>
         </div>
-        {supportTouch ? (
-          <PullToRefresh
-            onRefresh={async () => {
-              refresh()
-              await new Promise((resolve) => setTimeout(resolve, 1000))
-            }}
-            pullingContent=""
-          >
-            {list}
-          </PullToRefresh>
-        ) : (
-          list
-        )}
+        <PullToRefresh
+          onRefresh={async () => {
+            refresh()
+            await new Promise((resolve) => setTimeout(resolve, 1000))
+          }}
+        >
+          {list}
+        </PullToRefresh>
         <div className="h-20" />
         {filteredNewEvents.length > 0 && (
           <NewNotesButton newEvents={filteredNewEvents} onClick={showNewEvents} />
@@ -522,7 +508,7 @@ function UserAggregationItem({
   isNew?: boolean
 }) {
   const { t } = useTranslation()
-  const supportTouch = useMemo(() => isTouchDevice(), [])
+  const supportsHover = useMemo(() => canHover(), [])
   const [hasNewEvents, setHasNewEvents] = useState(true)
   const [loading, setLoading] = useState(false)
   const { isPinned, togglePin } = usePinnedUsers()
@@ -572,19 +558,19 @@ function UserAggregationItem({
       )}
       onClick={onClick}
     >
-      {supportTouch ? (
+      {supportsHover ? (
+        <UserAvatar userId={aggregation.pubkey} className={!hasNewEvents ? 'grayscale' : ''} />
+      ) : (
         <SimpleUserAvatar
           userId={aggregation.pubkey}
           className={!hasNewEvents ? 'grayscale' : ''}
         />
-      ) : (
-        <UserAvatar userId={aggregation.pubkey} className={!hasNewEvents ? 'grayscale' : ''} />
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-2">
-          {supportTouch ? (
-            <SimpleUsername
+          {supportsHover ? (
+            <Username
               userId={aggregation.pubkey}
               className={cn(
                 'max-w-fit truncate text-base font-semibold',
@@ -593,7 +579,7 @@ function UserAggregationItem({
               skeletonClassName="h-4"
             />
           ) : (
-            <Username
+            <SimpleUsername
               userId={aggregation.pubkey}
               className={cn(
                 'max-w-fit truncate text-base font-semibold',
@@ -614,7 +600,7 @@ function UserAggregationItem({
         variant="ghost"
         size="icon"
         onClick={onTogglePin}
-        className={`flex-shrink-0 ${
+        className={`shrink-0 ${
           pinned
             ? 'text-primary hover:text-primary/80'
             : 'text-muted-foreground hover:text-foreground'
@@ -630,7 +616,7 @@ function UserAggregationItem({
 
       <button
         className={cn(
-          'flex size-10 flex-shrink-0 flex-col items-center justify-center rounded-full border border-primary/80 bg-primary/10 font-bold tabular-nums text-primary transition-colors hover:border-primary hover:bg-primary/20',
+          'flex size-10 shrink-0 flex-col items-center justify-center rounded-full border border-primary/80 bg-primary/10 font-bold tabular-nums text-primary transition-colors hover:border-primary hover:bg-primary/20',
           !hasNewEvents &&
             'border-muted-foreground/80 bg-muted-foreground/10 text-muted-foreground/80 hover:border-muted-foreground hover:bg-muted-foreground/20 hover:text-muted-foreground'
         )}
@@ -645,12 +631,12 @@ function UserAggregationItem({
 function UserAggregationItemSkeleton() {
   return (
     <div className="flex items-center gap-4 px-4 py-3">
-      <Skeleton className="size-10 rounded-full" />
+      <UserAvatarSkeleton className="size-10" />
       <div className="flex-1">
         <Skeleton className="my-1 h-4 w-36" />
         <Skeleton className="my-1 h-3 w-14" />
       </div>
-      <Skeleton className="size-10 rounded-full" />
+      <UserAvatarSkeleton className="size-10" />
     </div>
   )
 }

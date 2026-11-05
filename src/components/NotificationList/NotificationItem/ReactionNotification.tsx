@@ -1,5 +1,6 @@
 import Image from '@/components/Image'
 import { useFetchEvent } from '@/hooks'
+import { getEventAuthorPubkey } from '@/lib/event'
 import { generateBech32IdFromATag, generateBech32IdFromETag, tagNameEquals } from '@/lib/tag'
 import { useNostr } from '@/providers/NostrProvider'
 import { useNotificationUserPreference } from '@/providers/NotificationUserPreferenceProvider'
@@ -11,10 +12,12 @@ import Notification from './Notification'
 
 export function ReactionNotification({
   notification,
-  isNew = false
+  isNew = false,
+  onVisibilityChange
 }: {
   notification: Event
   isNew?: boolean
+  onVisibilityChange?: (isVisible: boolean) => void
 }) {
   const { t } = useTranslation()
   const { pubkey } = useNostr()
@@ -58,7 +61,7 @@ export function ReactionNotification({
   if (!event || !eventId || !reaction) {
     return null
   }
-  if (hideIndirect && event.pubkey !== pubkey) {
+  if (hideIndirect && getEventAuthorPubkey(event) !== pubkey) {
     return null
   }
 
@@ -71,6 +74,7 @@ export function ReactionNotification({
       targetEvent={event}
       description={t('reacted to your note')}
       isNew={isNew}
+      onVisibilityChange={onVisibilityChange}
     />
   )
 }

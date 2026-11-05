@@ -13,11 +13,18 @@ import SubReplies from './SubReplies'
 const LIMIT = 100
 const SHOW_COUNT = 10
 
-export default function ReplyNoteList({ stuff }: { stuff: NEvent | string }) {
+export default function ReplyNoteList({
+  stuff,
+  opPubkey
+}: {
+  stuff: NEvent | string
+  opPubkey?: string
+}) {
   const { t } = useTranslation()
   const { stuffKey } = useStuff(stuff)
   const [initialLoading, setInitialLoading] = useState(false)
-  const { replies } = useFilteredReplies(stuffKey)
+  const { replies, isLoading: isHydratingReplies } = useFilteredReplies(stuffKey)
+  const isReplyLoading = initialLoading || isHydratingReplies
 
   // Initial subscription
   useEffect(() => {
@@ -42,22 +49,22 @@ export default function ReplyNoteList({ stuff }: { stuff: NEvent | string }) {
     items: replies,
     showCount: SHOW_COUNT,
     onLoadMore: handleLoadMore,
-    initialLoading
+    initialLoading: isReplyLoading
   })
 
   return (
     <div className="min-h-[80vh]">
-      {(loading || initialLoading) && <LoadingBar />}
+      {(loading || isReplyLoading) && <LoadingBar />}
       <div>
         {visibleItems.map((reply) => (
-          <Item key={reply.id} reply={reply} />
+          <Item key={reply.id} reply={reply} opPubkey={opPubkey} />
         ))}
       </div>
       <div ref={bottomRef} />
       {shouldShowLoadingIndicator ? (
         <ReplyNoteSkeleton />
       ) : (
-        <div className="mb-3 mt-2 text-center text-sm text-muted-foreground">
+        <div className="text-muted-foreground mt-2 mb-3 text-center text-sm">
           {replies.length > 0 ? t('no more replies') : t('no replies')}
         </div>
       )}
@@ -65,13 +72,13 @@ export default function ReplyNoteList({ stuff }: { stuff: NEvent | string }) {
   )
 }
 
-function Item({ reply }: { reply: NEvent }) {
+function Item({ reply, opPubkey }: { reply: NEvent; opPubkey?: string }) {
   const key = useMemo(() => getEventKey(reply), [reply])
 
   return (
     <div className="relative border-b">
-      <ReplyNote event={reply} />
-      <SubReplies parentKey={key} />
+      <ReplyNote event={reply} opPubkey={opPubkey} />
+      <SubReplies parentKey={key} opPubkey={opPubkey} />
     </div>
   )
 }

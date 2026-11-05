@@ -18,6 +18,7 @@ Experience Jumble at [https://jumble.social](https://jumble.social)
 - [https://fevela.me/](https://fevela.me/) - by [@daniele](https://jumble.social/users/npub10000003zmk89narqpczy4ff6rnuht2wu05na7kpnh3mak7z2tqzsv8vwqk)
 - [https://x21.com/](https://x21.com/) - by [@Karnage](https://jumble.social/users/npub1r0rs5q2gk0e3dk3nlc7gnu378ec6cnlenqp8a3cjhyzu6f8k5sgs4sq9ac)
 - [https://jumble.imwald.eu/](https://jumble.imwald.eu/) Repo: [Silberengel/jumble](https://github.com/Silberengel/jumble) - by [@Silberengel](https://jumble.social/users/npub1l5sga6xg72phsz5422ykujprejwud075ggrr3z2hwyrfgr7eylqstegx9z)
+- [https://jumble.thecaptain.dev/](https://jumble.thecaptain.dev/) by [@Vibe Captain](https://jumble.social/users/npub1vlprg9j8u5l92az0zd6yd8ks7tl560v8ssepdkn07nwekdl9rs4saccfwp)
 
 ## Run Locally
 
@@ -35,6 +36,24 @@ npm install
 npm run dev
 ```
 
+Builds use the TypeScript 7 native compiler (`tsc`), installed as `@typescript/native`. The `typescript` dependency aliases the official TypeScript 6 compatibility package so ESLint can continue using its compiler API. Keep both dependencies when updating the toolchain. See the [official side-by-side setup](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60).
+
+The dependency overrides move `minimatch` 10.x consumers to 11.0.3+ and Workbox's `glob` to 14.0.3+ to address [pattern amplification](https://github.com/advisories/GHSA-g3hv-75wg-m249) and [cancellation handling](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4) advisories. Older `minimatch` consumers retain their declared versions because their APIs differ. Remove these overrides when the upstream tools adopt compatible patched releases.
+
+For a web-only build on a system that cannot download the Electron binary, skip that download while keeping platform-specific build dependencies such as Rolldown and TypeScript:
+
+```bash
+ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install
+npm run build
+```
+
+Capacitor packages (`@capacitor/*`) are optional and are only needed for Android.
+Web and Electron builds use a local substitute and can build without those packages
+installed. Android builds resolve and type-check the actual Capacitor packages.
+A normal `npm install` still includes optional dependencies. Avoid globally omitting
+all optional dependencies unless you also provide the platform binaries required
+by build tools such as Rolldown.
+
 ## Run Docker
 
 ```bash
@@ -49,6 +68,53 @@ docker compose up --build -d
 ```
 
 After finishing, access: http://localhost:8089
+
+## Run as Android App (Capacitor)
+
+Android reuses the web UI and business logic, with native encrypted storage,
+back navigation, deep links, and local notifications. Requires Android SDK 36
+and JDK 21.
+
+```sh
+npm run android:run  # Build and launch on an emulator or connected device
+npm run android:apk  # Build a debug APK
+```
+
+See [Android development and release notes](docs/android.md) for setup,
+architecture, signing, and the initial integration's limitations.
+
+## Run as Desktop App (Electron)
+
+Jumble can also run as a native desktop app via Electron. The desktop build runs all relay WebSockets in the main process (bypassing Chrome's per-origin connection cap) and stores secrets in the OS keychain via Electron's `safeStorage`.
+
+```bash
+# Clone and install (same as above)
+git clone https://github.com/CodyTseng/jumble.git
+cd jumble
+npm install
+
+# Start in dev mode (vite dev server + auto-launch Electron)
+npm run electron:dev
+
+# Build a distributable for the current platform
+# Output goes to release/<version>/
+npm run electron:build
+
+# Preview a production build without packaging
+npm run electron:preview
+```
+
+Unpackaged Electron runs (`electron:dev` and `electron:preview`) use a separate
+`jumble-dev` data directory so they can run alongside the installed app.
+Development sessions start with their own accounts and settings.
+
+The web build (`npm run dev`, `npm run build`) is unaffected and never loads any Electron-only code.
+
+## Continuous integration
+
+Branch pushes and pull requests run lint, the test suite, and a web/PWA build. Windows x64 and Linux x64/arm64 jobs then build installers and launch the unpacked applications. The smoke test checks packaged runtime files, the preload IPC bridge, initial rendering, and Settings navigation. On Linux without a keychain it also exercises password setup on the fresh CI runner. Screenshots and logs are uploaded and downloaded again to verify artifact handling.
+
+`scripts/electron-smoke.mjs <unpacked-app-directory>` requires a disposable CI runner because it may initialize application storage. To check package contents locally without starting the application, append `--verify-only`.
 
 ## Community mode (Optional)
 
@@ -76,7 +142,7 @@ VITE_COMMUNITY_RELAYS="wss://relay.example.com/,wss://relay.example.org/"
 
 If you like this project, you can buy me a coffee :)
 
-- **Lightning:** ⚡️ codytseng@getalby.com ⚡️
+- **Lightning:** [codytseng@getalby.com](https://bitcointipjar.com/cody)
 - **Bitcoin:** bc1qwp2uqjd2dy32qfe39kehnlgx3hyey0h502fvht
 - **Geyser:** https://geyser.fund/project/jumble
 

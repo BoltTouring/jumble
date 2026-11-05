@@ -11,7 +11,7 @@ export default function ScrollToTopButton({
   scrollAreaRef,
   className
 }: {
-  scrollAreaRef?: React.RefObject<HTMLDivElement>
+  scrollAreaRef?: React.RefObject<HTMLDivElement | null>
   className?: string
 }) {
   const { deepBrowsing, lastScrollTop } = useDeepBrowsing()
@@ -52,7 +52,7 @@ export default function ScrollToTopButton({
   return (
     <div
       className={cn(
-        'pointer-events-none sticky z-30 flex w-full justify-end pr-3 transition-all duration-700',
+        'pointer-events-none sticky z-30 flex w-full justify-end pe-3 transition-all duration-700',
         visible ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0',
         className
       )}
@@ -64,7 +64,7 @@ export default function ScrollToTopButton({
     >
       <Button
         variant="secondary-2"
-        className="pointer-events-auto size-12 rounded-full p-0 transition-all duration-200 hover:text-background disabled:pointer-events-none"
+        className="hover:text-background pointer-events-auto size-12 rounded-full p-0 transition-all duration-200 disabled:pointer-events-none"
         onClick={handleScrollToTop}
         disabled={!visible}
       >

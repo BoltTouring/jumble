@@ -1,9 +1,12 @@
+import { UserAvatarSkeleton } from '@/components/UserAvatar'
 import { Skeleton } from '@/components/ui/skeleton'
 import { NSFW_DISPLAY_POLICY } from '@/constants'
-import { isMentioningMutedUsers, isNsfwEvent } from '@/lib/event'
+import { useZapReceiptValidation } from '@/hooks'
+import { getEventAuthorPubkey, isMentioningMutedUsers, isNsfwEvent } from '@/lib/event'
 import { cn } from '@/lib/utils'
 import { useContentPolicy } from '@/providers/ContentPolicyProvider'
 import { useMuteList } from '@/providers/MuteListProvider'
+import { useNostr } from '@/providers/NostrProvider'
 import { Event, kinds } from 'nostr-tools'
 import { useMemo } from 'react'
 import MainNoteCard from './MainNoteCard'
@@ -22,21 +25,35 @@ export default function NoteCard({
   pinned?: boolean
   reposters?: string[]
 }) {
+  const { pubkey } = useNostr()
   const { mutePubkeySet } = useMuteList()
   const { hideContentMentioningMutedUsers, nsfwDisplayPolicy } = useContentPolicy()
+  const validZapReceipt = useZapReceiptValidation(event)
   const shouldHide = useMemo(() => {
-    if (filterMutedNotes && mutePubkeySet.has(event.pubkey)) {
+    if (pubkey && event.pubkey === pubkey) return false
+    if (filterMutedNotes && mutePubkeySet.has(getEventAuthorPubkey(event))) {
       return true
     }
-    if (hideContentMentioningMutedUsers && isMentioningMutedUsers(event, mutePubkeySet)) {
+    if (
+      filterMutedNotes &&
+      hideContentMentioningMutedUsers &&
+      isMentioningMutedUsers(event, mutePubkeySet)
+    ) {
       return true
     }
     if (nsfwDisplayPolicy === NSFW_DISPLAY_POLICY.HIDE && isNsfwEvent(event)) {
       return true
     }
     return false
-  }, [event, filterMutedNotes, mutePubkeySet, nsfwDisplayPolicy])
-  if (shouldHide) return null
+  }, [
+    event,
+    pubkey,
+    filterMutedNotes,
+    mutePubkeySet,
+    hideContentMentioningMutedUsers,
+    nsfwDisplayPolicy
+  ])
+  if (shouldHide || validZapReceipt !== true) return null
 
   if (event.kind === kinds.Repost || event.kind === kinds.GenericRepost) {
     return (
@@ -55,8 +72,8 @@ export default function NoteCard({
 export function NoteCardLoadingSkeleton({ className }: { className?: string }) {
   return (
     <div className={cn('px-4 py-3', className)}>
-      <div className="flex items-center space-x-2">
-        <Skeleton className="h-10 w-10 rounded-full" />
+      <div className="flex items-center gap-2">
+        <UserAvatarSkeleton className="h-10 w-10" />
         <div className={`w-0 flex-1`}>
           <div className="py-1">
             <Skeleton className="h-4 w-16" />

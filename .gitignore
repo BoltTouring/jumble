@@ -9,10 +9,16 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-electron
 dist-ssr
 dev-dist
+release
+flatpak/build-dir
+flatpak/.flatpak-builder
+flatpak/repo
 *.local
 .env
+electron-builder.env
 
 # Editor directories and files
 .vscode/*
@@ -28,3 +34,12 @@ dev-dist
 .vercel
 
 .claude/
+
+# CI smoke test output
+test-results/
+
+# Android build output and local signing configuration
+dist-android
+android/key.properties
+*.jks
+*.keystore

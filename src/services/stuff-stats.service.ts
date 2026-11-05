@@ -1,26 +1,48 @@
 import { ExtendedKind } from '@/constants'
-import { getEventKey, getReplaceableCoordinateFromEvent, isReplaceableEvent } from '@/lib/event'
+import { BoundedMap } from '@/lib/bounded-map'
+import {
+  getEventKey,
+  getEventAuthorPubkey,
+  getNoteBech32Id,
+  getReplaceableCoordinateFromEvent,
+  isProtectedEvent,
+  isReplaceableEvent
+} from '@/lib/event'
 import { getZapInfoFromEvent } from '@/lib/event-metadata'
-import { getDefaultRelayUrls } from '@/lib/relay'
+import { getDefaultRelayUrls, mergeRelayUrls } from '@/lib/relay'
 import { getEmojiInfosFromEmojiTags, tagNameEquals } from '@/lib/tag'
 import client from '@/services/client.service'
+import lightning from '@/services/lightning.service'
 import { TEmoji } from '@/types'
 import dayjs from 'dayjs'
 import { Event, Filter, kinds } from 'nostr-tools'
 
 export type TStuffStats = {
   likeIdSet: Set<string>
-  likes: { id: string; pubkey: string; created_at: number; emoji: TEmoji | string }[]
+  likes: {
+    id: string
+    eventId: string
+    pubkey: string
+    created_at: number
+    emoji: TEmoji | string
+  }[]
   repostPubkeySet: Set<string>
   reposts: { id: string; pubkey: string; created_at: number }[]
   zapPrSet: Set<string>
-  zaps: { pr: string; pubkey: string; amount: number; created_at: number; comment?: string }[]
+  zaps: {
+    pr: string
+    eventId?: string
+    pubkey: string
+    amount: number
+    created_at: number
+    comment?: string
+  }[]
   updatedAt?: number
 }
 
 class StuffStatsService {
   static instance: StuffStatsService
-  private stuffStatsMap: Map<string, Partial<TStuffStats>> = new Map()
+  private stuffStatsMap = new BoundedMap<string, Partial<TStuffStats>>({ maxSize: 2_000 })
   private stuffStatsSubscribers = new Map<string, Set<() => void>>()
 
   constructor() {
@@ -41,8 +63,9 @@ class StuffStatsService {
     if (oldStats?.updatedAt) {
       since = oldStats.updatedAt
     }
-    const [relayList, authorProfile] = event
-      ? await Promise.all([client.fetchRelayList(event.pubkey), client.fetchProfile(event.pubkey)])
+    const authorPubkey = event ? getEventAuthorPubkey(event) : undefined
+    const [relayList, authorProfile] = authorPubkey
+      ? await Promise.all([client.fetchRelayList(authorPubkey), client.fetchProfile(authorPubkey)])
       : []
 
     const replaceableCoordinate =
@@ -151,9 +174,12 @@ class StuffStatsService {
       })
     }
 
-    const relays = relayList
-      ? relayList.read.concat(getDefaultRelayUrls()).slice(0, 5)
-      : getDefaultRelayUrls()
+    const seenOnRelayUrls = event ? client.getSeenEventRelayUrls(event.id) : []
+    const baseRelays = mergeRelayUrls(5, relayList?.read ?? [], getDefaultRelayUrls())
+    const relays =
+      event && isProtectedEvent(event)
+        ? mergeRelayUrls(baseRelays, seenOnRelayUrls)
+        : mergeRelayUrls(5, baseRelays, seenOnRelayUrls)
 
     const events: Event[] = []
     await client.fetchEvents(relays, filters, {
@@ -200,7 +226,8 @@ class StuffStatsService {
     amount: number,
     comment?: string,
     created_at: number = dayjs().unix(),
-    notify: boolean = true
+    notify: boolean = true,
+    zapEventId?: string
   ) {
     const old = this.stuffStatsMap.get(eventId) || {}
     const zapPrSet = old.zapPrSet || new Set()
@@ -208,7 +235,7 @@ class StuffStatsService {
     if (zapPrSet.has(pr)) return
 
     zapPrSet.add(pr)
-    zaps.push({ pr, pubkey, amount, comment, created_at })
+    zaps.push({ pr, eventId: zapEventId, pubkey, amount, comment, created_at })
     this.stuffStatsMap.set(eventId, { ...old, zapPrSet, zaps })
     if (notify) {
       this.notifyStuffStats(eventId)
@@ -227,7 +254,9 @@ class StuffStatsService {
       } else if (evt.kind === kinds.Repost || evt.kind === kinds.GenericRepost) {
         targetKey = this.addRepostByEvent(evt)
       } else if (evt.kind === kinds.Zap) {
-        targetKey = this.addZapByEvent(evt)
+        // Zap receipts need an async issuer check before counting; the
+        // method validates the receipt and notifies subscribers itself.
+        this.addZapByEvent(evt)
       }
       if (targetKey) {
         targetKeySet.add(targetKey)
@@ -269,7 +298,13 @@ class StuffStatsService {
     }
 
     likeIdSet.add(evt.id)
-    likes.push({ id: evt.id, pubkey: evt.pubkey, created_at: evt.created_at, emoji })
+    likes.push({
+      id: evt.id,
+      eventId: getNoteBech32Id(evt),
+      pubkey: evt.pubkey,
+      created_at: evt.created_at,
+      emoji
+    })
     this.stuffStatsMap.set(targetEventKey, { ...old, likeIdSet, likes })
     return targetEventKey
   }
@@ -298,7 +333,13 @@ class StuffStatsService {
     }
 
     likeIdSet.add(evt.id)
-    likes.push({ id: evt.id, pubkey: evt.pubkey, created_at: evt.created_at, emoji })
+    likes.push({
+      id: evt.id,
+      eventId: getNoteBech32Id(evt),
+      pubkey: evt.pubkey,
+      created_at: evt.created_at,
+      emoji
+    })
     this.stuffStatsMap.set(target, { ...old, likeIdSet, likes })
     return target
   }
@@ -325,20 +366,24 @@ class StuffStatsService {
     return targetEventKey
   }
 
-  private addZapByEvent(evt: Event) {
+  private async addZapByEvent(evt: Event) {
     const info = getZapInfoFromEvent(evt)
     if (!info) return
     const { originalEventId, senderPubkey, invoice, amount, comment } = info
     if (!originalEventId || !senderPubkey || amount <= 0) return
 
-    return this.addZap(
+    const valid = await lightning.validateZapReceipt(evt)
+    if (!valid) return
+
+    this.addZap(
       senderPubkey,
       originalEventId,
       invoice,
       amount,
       comment,
       evt.created_at,
-      false
+      true,
+      getNoteBech32Id(evt)
     )
   }
 }

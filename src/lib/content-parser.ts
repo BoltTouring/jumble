@@ -9,6 +9,9 @@ import {
   X_URL_REGEX,
   YOUTUBE_URL_REGEX
 } from '@/constants'
+import { LinkifyIt } from 'linkify-it'
+import { nip19 } from 'nostr-tools'
+import tlds from 'tlds'
 import { isImage, isMedia } from './url'
 
 export type TEmbeddedNodeType =
@@ -18,10 +21,11 @@ export type TEmbeddedNodeType =
   | 'media'
   | 'event'
   | 'mention'
-  | 'legacy-mention'
   | 'hashtag'
   | 'websocket-url'
   | 'url'
+  | 'web-preview'
+  | 'bare-url'
   | 'emoji'
   | 'invoice'
   | 'youtube'
@@ -51,10 +55,68 @@ export const EmbeddedMentionParser: TContentParser = {
   regex: EMBEDDED_MENTION_REGEX
 }
 
-export const EmbeddedLegacyMentionParser: TContentParser = {
-  type: 'legacy-mention',
-  regex: /npub1[a-z0-9]{58}|nprofile1[a-z0-9]+/g
+// Some clients publish references without the `nostr:` prefix. These parsers
+// pick those up so they render like any other reference instead of as a wall of
+// bech32. They must run after EmbeddedUrlParser, so that a reference inside a
+// link has already been claimed as a URL.
+const BARE_MENTION_REGEX = /(?:npub1|nprofile1)[023456789acdefghjklmnpqrstuvwxyz]{20,}/g
+const BARE_EVENT_REGEX = /(?:nevent1|note1|naddr1)[023456789acdefghjklmnpqrstuvwxyz]{20,}/g
+
+function createBareReferenceParser(
+  regex: RegExp,
+  type: 'mention' | 'event'
+): (content: string) => TEmbeddedNode[] {
+  return (content: string) => {
+    const result: TEmbeddedNode[] = []
+    let lastIndex = 0
+
+    for (const match of content.matchAll(regex)) {
+      let start = match.index!
+      const end = start + match[0].length
+      // Some clients write a mention as `@npub1…`. The mention already renders
+      // its own `@`, so consume that prefix instead of leaving it as text.
+      if (type === 'mention' && content[start - 1] === '@') start--
+      const before = start === 0 ? '' : content[start - 1]
+      const after = content.slice(end)
+
+      // Only treat it as a reference when it stands on its own. A bech32 id
+      // wedged between other characters usually belongs to something else —
+      // most often a URL, e.g. npub1….blossom.band/image.png.
+      const isolated = before === '' || /[\s([<"']/.test(before)
+      const runsIntoUrl = /^(?:\.[a-zA-Z0-9-]|\/)/.test(after)
+      if (!isolated || runsIntoUrl) continue
+
+      try {
+        nip19.decode(match[0])
+      } catch {
+        continue
+      }
+
+      if (start > lastIndex) {
+        result.push({ type: 'text', data: content.slice(lastIndex, start) })
+      }
+      // Normalize to the prefixed form so everything downstream — rendering,
+      // layout, block detection — treats it exactly like a prefixed reference.
+      result.push({ type, data: `nostr:${match[0]}` })
+      lastIndex = end
+    }
+
+    if (lastIndex < content.length) {
+      result.push({ type: 'text', data: content.slice(lastIndex) })
+    }
+    return result
+  }
 }
+
+export const EmbeddedLegacyMentionParser: TContentParser = createBareReferenceParser(
+  BARE_MENTION_REGEX,
+  'mention'
+)
+
+export const EmbeddedLegacyEventParser: TContentParser = createBareReferenceParser(
+  BARE_EVENT_REGEX,
+  'event'
+)
 
 export const EmbeddedEventParser: TContentParser = {
   type: 'event',
@@ -130,6 +192,40 @@ export const EmbeddedUrlParser: TContentParser = (content: string) => {
   return result
 }
 
+// Profile descriptions keep all HTTP URLs inline, including media and embeds.
+export const EmbeddedInlineUrlParser = (content: string): TEmbeddedNode[] =>
+  EmbeddedUrlParser(content).map((node) =>
+    node.type === 'text' ? node : { type: 'url', data: node.data as string }
+  )
+
+// Bare domains (jumble.social/notes, www.habla.news) link the way people expect
+// from other apps. Only scheme-less matches count, on the full IANA TLD list;
+// explicit URLs are EmbeddedUrlParser's. A match is an inference, so it
+// renders as an inline link, never a preview card. Run this parser last, so
+// URLs and nostr references claim their text first.
+const bareDomainLinkify = new LinkifyIt({
+  fuzzyLink: true,
+  fuzzyEmail: false,
+  fuzzyIP: false
+}).tlds(tlds, true)
+
+export const EmbeddedBareDomainParser: TContentParser = (content: string) => {
+  const result: TEmbeddedNode[] = []
+  let lastIndex = 0
+  for (const match of bareDomainLinkify.match(content) ?? []) {
+    if (match.schema !== '' || match.index < lastIndex) continue
+    if (match.index > lastIndex) {
+      result.push({ type: 'text', data: content.slice(lastIndex, match.index) })
+    }
+    result.push({ type: 'bare-url', data: match.raw })
+    lastIndex = match.lastIndex
+  }
+  if (lastIndex < content.length) {
+    result.push({ type: 'text', data: content.slice(lastIndex) })
+  }
+  return result
+}
+
 export function parseContent(content: string, parsers: TContentParser[]) {
   let nodes: TEmbeddedNode[] = [{ type: 'text', data: content.trim() }]
 
@@ -147,11 +243,15 @@ export function parseContent(content: string, parsers: TContentParser[]) {
         let lastIndex = 0
         for (const match of matches) {
           const matchStart = match.index!
+          const nodeStart =
+            parser.type === 'mention' && node.data[matchStart - 1] === '@'
+              ? matchStart - 1
+              : matchStart
           // Add text before the match
-          if (matchStart > lastIndex) {
+          if (nodeStart > lastIndex) {
             result.push({
               type: 'text',
-              data: node.data.slice(lastIndex, matchStart)
+              data: node.data.slice(lastIndex, nodeStart)
             })
           }
 

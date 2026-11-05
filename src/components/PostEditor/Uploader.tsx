@@ -1,6 +1,6 @@
-import mediaUpload, { UPLOAD_ABORTED_ERROR_MSG } from '@/services/media-upload.service'
+import { showUploadErrorToast } from '@/lib/upload-error-toast'
+import mediaUpload from '@/services/media-upload.service'
 import { useRef } from 'react'
-import { toast } from 'sonner'
 
 export default function Uploader({
   children,
@@ -9,44 +9,54 @@ export default function Uploader({
   onUploadEnd,
   onProgress,
   className,
-  accept = 'image/*'
+  accept = 'image/*',
+  multiple = true,
+  validateFile
 }: {
   children: React.ReactNode
-  onUploadSuccess: ({ url, tags }: { url: string; tags: string[][] }) => void
+  onUploadSuccess: ({ url, tags }: { url: string; tags: string[][] }, file: File) => void
   onUploadStart?: (file: File, cancel: () => void) => void
   onUploadEnd?: (file: File) => void
   onProgress?: (file: File, progress: number) => void
   className?: string
   accept?: string
+  multiple?: boolean
+  validateFile?: (file: File) => string | undefined
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files) return
 
+    const files = Array.from(event.target.files)
+    const validFiles = files.filter((file) => {
+      const validationError = validateFile?.(file)
+      if (!validationError) return true
+
+      showUploadErrorToast(new Error(validationError))
+      return false
+    })
+
     const abortControllerMap = new Map<File, AbortController>()
 
-    for (const file of event.target.files) {
+    for (const file of validFiles) {
       const abortController = new AbortController()
       abortControllerMap.set(file, abortController)
       onUploadStart?.(file, () => abortController.abort())
     }
 
-    for (const file of event.target.files) {
+    for (const file of validFiles) {
       try {
         const abortController = abortControllerMap.get(file)
         const result = await mediaUpload.upload(file, {
           onProgress: (p) => onProgress?.(file, p),
           signal: abortController?.signal
         })
-        onUploadSuccess(result)
+        onUploadSuccess(result, file)
         onUploadEnd?.(file)
       } catch (error) {
         console.error('Error uploading file', error)
-        const message = (error as Error).message
-        if (message !== UPLOAD_ABORTED_ERROR_MSG) {
-          toast.error(`Failed to upload file: ${message}`)
-        }
+        showUploadErrorToast(error)
         if (fileInputRef.current) {
           fileInputRef.current.value = ''
         }
@@ -71,7 +81,7 @@ export default function Uploader({
         style={{ display: 'none' }}
         onChange={handleFileChange}
         accept={accept}
-        multiple
+        multiple={multiple}
       />
     </div>
   )

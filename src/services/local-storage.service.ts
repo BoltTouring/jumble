@@ -1,17 +1,25 @@
 import {
   ALLOWED_FILTER_KINDS,
   BIG_RELAY_URLS,
+  DEFAULT_BLOSSOM_CACHE_SERVER_URL,
   DEFAULT_FAVICON_URL_TEMPLATE,
-  DEFAULT_NIP_96_SERVICE,
+  DEFAULT_FEED_TABS,
+  DEFAULT_NOTIFICATION_FILTERS,
+  DEFAULT_NOTIFICATION_TABS,
   ExtendedKind,
   MEDIA_AUTO_LOAD_POLICY,
   NOTIFICATION_LIST_STYLE,
   NSFW_DISPLAY_POLICY,
+  PROCESSED_SYNC_REQUEST_ID_RETENTION_MS,
   PROFILE_PICTURE_AUTO_LOAD_POLICY,
+  SEARCHABLE_RELAY_URLS,
   StorageKey,
   TPrimaryColor
 } from '@/constants'
 import { isSameAccount } from '@/lib/account'
+import { getNativeStorageBridge } from '@/lib/native-storage'
+import { isAndroid } from '@/lib/platform'
+import { supportsDirectMessages } from '@/lib/platform-capabilities'
 import { randomString } from '@/lib/random'
 import { isTorBrowser } from '@/lib/utils'
 import {
@@ -19,10 +27,11 @@ import {
   TAccountPointer,
   TEmoji,
   TFeedInfo,
+  TFeedTabConfig,
   TMediaAutoLoadPolicy,
   TMediaUploadServiceConfig,
-  TNoteListMode,
   TNotificationStyle,
+  TNotificationTabConfig,
   TNsfwDisplayPolicy,
   TProfilePictureAutoLoadPolicy,
   TRelaySet,
@@ -31,6 +40,8 @@ import {
 } from '@/types'
 import { kinds } from 'nostr-tools'
 
+type TProcessedSyncRequestIdMap = Record<string, number>
+
 class LocalStorageService {
   static instance: LocalStorageService
 
@@ -38,38 +49,74 @@ class LocalStorageService {
   private themeSetting: TThemeSetting = 'system'
   private accounts: TAccount[] = []
   private currentAccount: TAccount | null = null
-  private noteListMode: TNoteListMode = 'posts'
+  private feedTabs: TFeedTabConfig[] = DEFAULT_FEED_TABS
   private lastReadNotificationTimeMap: Record<string, number> = {}
+  private notificationTabs: TNotificationTabConfig[] = DEFAULT_NOTIFICATION_TABS
   private defaultZapSats: number = 21
   private defaultZapComment: string = 'Zap!'
   private quickZap: boolean = false
   private accountFeedInfoMap: Record<string, TFeedInfo | undefined> = {}
-  private mediaUploadService: string = DEFAULT_NIP_96_SERVICE
   private autoplay: boolean = true
   private videoLoop: boolean = false
   private translationServiceConfigMap: Record<string, TTranslationServiceConfig> = {}
   private mediaUploadServiceConfigMap: Record<string, TMediaUploadServiceConfig> = {}
   private dismissedTooManyRelaysAlert: boolean = false
+  private dismissedDesktopAppTip: boolean = false
+  private dismissedPsstPsstPromotion: boolean = false
   private showKinds: number[] = []
+  private showKindsMap: Record<string, number[]> = {}
   private hideContentMentioningMutedUsers: boolean = false
   private notificationListStyle: TNotificationStyle = NOTIFICATION_LIST_STYLE.DETAILED
   private mediaAutoLoadPolicy: TMediaAutoLoadPolicy = MEDIA_AUTO_LOAD_POLICY.ALWAYS
+  private showLinkPreviews: boolean = true
   private profilePictureAutoLoadPolicy: TProfilePictureAutoLoadPolicy =
     PROFILE_PICTURE_AUTO_LOAD_POLICY.ALWAYS
   private shownCreateWalletGuideToastPubkeys: Set<string> = new Set()
   private sidebarCollapse: boolean = false
   private primaryColor: TPrimaryColor = 'DEFAULT'
   private enableSingleColumnLayout: boolean = true
+  private enableDm: boolean = false
+  private useNip22Replies: boolean = false
   private faviconUrlTemplate: string = DEFAULT_FAVICON_URL_TEMPLATE
   private filterOutOnionRelays: boolean = !isTorBrowser()
+  private allowInsecureConnection: boolean = false
+  private blossomCacheServerUrl: string = DEFAULT_BLOSSOM_CACHE_SERVER_URL
+  private blossomCacheServerEnabled: boolean = false
   private quickReaction: boolean = false
   private quickReactionEmoji: string | TEmoji = '+'
+  private addClientTag: boolean = false
+  private defaultMinPow: number | null = null
   private nsfwDisplayPolicy: TNsfwDisplayPolicy = NSFW_DISPLAY_POLICY.HIDE_CONTENT
   private defaultRelayUrls: string[] = BIG_RELAY_URLS
+  private searchRelayUrls: string[] = SEARCHABLE_RELAY_URLS
+  private searchHistory: string[] = []
   private mutedWords: string[] = []
   private minTrustScore: number = 0
   private minTrustScoreMap: Record<string, number> = {}
   private hideIndirectNotifications: boolean = false
+  private encryptionKeyPrivkeyMap: Record<string, string> = {}
+  // Rotated-out encryption keys kept around (per account) so messages still
+  // encrypted to them can be decrypted during the grace period. retiredAt is in ms.
+  private retiredEncryptionKeyMap: Record<string, { privkey: string; retiredAt: number }[]> = {}
+  // Per-pubkey maps for fields that historically lived inline on TAccount.
+  // Always the source of truth at runtime regardless of mode.
+  private nsecByPubkey: Record<string, string> = {}
+  private ncryptsecByPubkey: Record<string, string> = {}
+  private bunkerClientSecretByPubkey: Record<string, string> = {}
+  // True when secrets persist via a native encrypted store instead of localStorage.
+  private secretsViaNativeStorage = !!getNativeStorageBridge()
+  private secretsWriteBlocked = false
+  private secretsHydrated = false
+  private secretsWriteChain: Promise<void> = Promise.resolve()
+  private lastReadDmTimeMap: Record<string, Record<string, number>> = {}
+  private dmLastSyncedAtMap: Record<string, number> = {}
+  private dmBackwardCursorMap: Record<string, number> = {}
+  private processedSyncRequestIds: TProcessedSyncRequestIdMap = {}
+  private disableNotificationSync: boolean = false
+  private systemNotificationsEnabled: boolean = false
+  private systemGeneralNotificationsEnabled: boolean = true
+  private systemDmNotificationsEnabled: boolean = true
+  private systemNotificationsPrompted: boolean = false
 
   constructor() {
     if (!LocalStorageService.instance) {
@@ -86,14 +133,95 @@ class LocalStorageService {
     this.accounts = accountsStr ? JSON.parse(accountsStr) : []
     const currentAccountStr = window.localStorage.getItem(StorageKey.CURRENT_ACCOUNT)
     this.currentAccount = currentAccountStr ? JSON.parse(currentAccountStr) : null
-    const noteListModeStr = window.localStorage.getItem(StorageKey.NOTE_LIST_MODE)
-    this.noteListMode =
-      noteListModeStr && ['posts', 'postsAndReplies', '24h'].includes(noteListModeStr)
-        ? (noteListModeStr as TNoteListMode)
-        : 'posts'
+
+    // Peel any inline secrets out of accounts into per-pubkey maps so the
+    // accessor surface is uniform. In Web mode these maps are still backed
+    // by inline storage (re-attached on persistence). In Electron mode
+    // hydrate() will discard these and reload from safeStorage.
+    this.peelInlineSecrets()
+
+    const feedTabsStr = window.localStorage.getItem(StorageKey.FEED_TABS)
+    if (feedTabsStr) {
+      try {
+        const parsed = JSON.parse(feedTabsStr)
+        if (Array.isArray(parsed)) {
+          const valid = parsed.filter(
+            (tab): tab is TFeedTabConfig =>
+              tab != null &&
+              typeof tab === 'object' &&
+              typeof tab.id === 'string' &&
+              tab.id.length > 0 &&
+              typeof tab.label === 'string'
+          )
+          if (valid.length > 0) {
+            this.feedTabs = valid
+          }
+        }
+      } catch {
+        // ignore, fall back to defaults
+      }
+    }
     const lastReadNotificationTimeMapStr =
       window.localStorage.getItem(StorageKey.LAST_READ_NOTIFICATION_TIME_MAP) ?? '{}'
     this.lastReadNotificationTimeMap = JSON.parse(lastReadNotificationTimeMapStr)
+
+    const notificationTabsVersion = parseInt(
+      window.localStorage.getItem(StorageKey.NOTIFICATION_TABS_VERSION) ?? '0'
+    )
+    const notificationTabsStr = window.localStorage.getItem(StorageKey.NOTIFICATION_TABS)
+    if (notificationTabsStr) {
+      try {
+        const parsed = JSON.parse(notificationTabsStr)
+        if (Array.isArray(parsed)) {
+          const valid = parsed.flatMap((tab): TNotificationTabConfig[] => {
+            if (
+              !tab ||
+              typeof tab !== 'object' ||
+              typeof tab.id !== 'string' ||
+              tab.id.length === 0 ||
+              typeof tab.label !== 'string' ||
+              tab.label.length === 0 ||
+              !Array.isArray(tab.filters)
+            ) {
+              return []
+            }
+            const defaultTab = DEFAULT_NOTIFICATION_TABS.find((item) => item.id === tab.id)
+            return [
+              {
+                id: tab.id,
+                label: defaultTab?.label ?? tab.label,
+                filters: DEFAULT_NOTIFICATION_FILTERS.filter(
+                  (filter) =>
+                    tab.filters.includes(filter) ||
+                    (notificationTabsVersion < 1 &&
+                      defaultTab?.builtin === 'all' &&
+                      filter === 'highlights') ||
+                    (notificationTabsVersion < 2 &&
+                      (defaultTab?.builtin === 'all' || defaultTab?.builtin === 'reactions') &&
+                      filter === 'pollResponses') ||
+                    (notificationTabsVersion < 3 &&
+                      defaultTab?.builtin === 'mentions' &&
+                      filter === 'highlights')
+                ),
+                hidden: tab.hidden === true,
+                builtin: defaultTab?.builtin
+              }
+            ]
+          })
+          if (
+            valid.length > 0 &&
+            new Set(valid.map((tab) => tab.id)).size === valid.length &&
+            valid.some((tab) => tab.builtin === 'all') &&
+            valid.some((tab) => !tab.hidden)
+          ) {
+            this.notificationTabs = valid
+          }
+        }
+      } catch {
+        // ignore, fall back to defaults
+      }
+    }
+    window.localStorage.setItem(StorageKey.NOTIFICATION_TABS_VERSION, '3')
 
     const relaySetsStr = window.localStorage.getItem(StorageKey.RELAY_SETS)
     if (!relaySetsStr) {
@@ -132,10 +260,6 @@ class LocalStorageService {
       window.localStorage.getItem(StorageKey.ACCOUNT_FEED_INFO_MAP) ?? '{}'
     this.accountFeedInfoMap = JSON.parse(accountFeedInfoMapStr)
 
-    // deprecated
-    this.mediaUploadService =
-      window.localStorage.getItem(StorageKey.MEDIA_UPLOAD_SERVICE) ?? DEFAULT_NIP_96_SERVICE
-
     this.autoplay = window.localStorage.getItem(StorageKey.AUTOPLAY) !== 'false'
     this.videoLoop = window.localStorage.getItem(StorageKey.VIDEO_LOOP) === 'true'
 
@@ -171,6 +295,12 @@ class LocalStorageService {
     this.dismissedTooManyRelaysAlert =
       window.localStorage.getItem(StorageKey.DISMISSED_TOO_MANY_RELAYS_ALERT) === 'true'
 
+    this.dismissedDesktopAppTip =
+      window.localStorage.getItem(StorageKey.DISMISSED_DESKTOP_APP_TIP) === 'true'
+
+    this.dismissedPsstPsstPromotion =
+      window.localStorage.getItem(StorageKey.DISMISSED_PSSTPSST_PROMOTION) === 'true'
+
     const showKindsStr = window.localStorage.getItem(StorageKey.SHOW_KINDS)
     if (!showKindsStr) {
       this.showKinds = ALLOWED_FILTER_KINDS
@@ -198,6 +328,18 @@ class LocalStorageService {
     window.localStorage.setItem(StorageKey.SHOW_KINDS, JSON.stringify(this.showKinds))
     window.localStorage.setItem(StorageKey.SHOW_KINDS_VERSION, '4')
 
+    const showKindsMapStr = window.localStorage.getItem(StorageKey.SHOW_KINDS_MAP)
+    if (showKindsMapStr) {
+      try {
+        const map = JSON.parse(showKindsMapStr)
+        if (typeof map === 'object' && map !== null) {
+          this.showKindsMap = map
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     this.hideContentMentioningMutedUsers =
       window.localStorage.getItem(StorageKey.HIDE_CONTENT_MENTIONING_MUTED_USERS) === 'true'
 
@@ -215,17 +357,27 @@ class LocalStorageService {
       this.mediaAutoLoadPolicy = mediaAutoLoadPolicy as TMediaAutoLoadPolicy
     }
 
+    this.showLinkPreviews = window.localStorage.getItem(StorageKey.SHOW_LINK_PREVIEWS) !== 'false'
+
     const profilePictureAutoLoadPolicy = window.localStorage.getItem(
       StorageKey.PROFILE_PICTURE_AUTO_LOAD_POLICY
     )
-    if (
-      profilePictureAutoLoadPolicy &&
-      Object.values(PROFILE_PICTURE_AUTO_LOAD_POLICY).includes(
-        profilePictureAutoLoadPolicy as TProfilePictureAutoLoadPolicy
-      )
-    ) {
-      this.profilePictureAutoLoadPolicy =
-        profilePictureAutoLoadPolicy as TProfilePictureAutoLoadPolicy
+    if (profilePictureAutoLoadPolicy) {
+      // Migrate wifi-only to never
+      const policy =
+        profilePictureAutoLoadPolicy === 'wifi-only'
+          ? PROFILE_PICTURE_AUTO_LOAD_POLICY.NEVER
+          : profilePictureAutoLoadPolicy
+      if (
+        Object.values(PROFILE_PICTURE_AUTO_LOAD_POLICY).includes(
+          policy as TProfilePictureAutoLoadPolicy
+        )
+      ) {
+        this.profilePictureAutoLoadPolicy = policy as TProfilePictureAutoLoadPolicy
+        if (profilePictureAutoLoadPolicy === 'wifi-only') {
+          window.localStorage.setItem(StorageKey.PROFILE_PICTURE_AUTO_LOAD_POLICY, policy)
+        }
+      }
     }
 
     const shownCreateWalletGuideToastPubkeysStr = window.localStorage.getItem(
@@ -243,6 +395,10 @@ class LocalStorageService {
     this.enableSingleColumnLayout =
       window.localStorage.getItem(StorageKey.ENABLE_SINGLE_COLUMN_LAYOUT) !== 'false'
 
+    this.enableDm =
+      supportsDirectMessages() && window.localStorage.getItem(StorageKey.ENABLE_DM) === 'true'
+    this.useNip22Replies = window.localStorage.getItem(StorageKey.USE_NIP22_REPLIES) === 'true'
+
     this.faviconUrlTemplate =
       window.localStorage.getItem(StorageKey.FAVICON_URL_TEMPLATE) ?? DEFAULT_FAVICON_URL_TEMPLATE
 
@@ -251,7 +407,24 @@ class LocalStorageService {
       this.filterOutOnionRelays = filterOutOnionRelaysStr !== 'false'
     }
 
+    this.allowInsecureConnection =
+      window.localStorage.getItem(StorageKey.ALLOW_INSECURE_CONNECTION) === 'true'
+
+    this.blossomCacheServerUrl =
+      window.localStorage.getItem(StorageKey.BLOSSOM_CACHE_SERVER_URL) ??
+      DEFAULT_BLOSSOM_CACHE_SERVER_URL
+    this.blossomCacheServerEnabled =
+      window.localStorage.getItem(StorageKey.BLOSSOM_CACHE_SERVER_ENABLED) === 'true'
+
     this.quickReaction = window.localStorage.getItem(StorageKey.QUICK_REACTION) === 'true'
+    this.addClientTag = window.localStorage.getItem(StorageKey.ADD_CLIENT_TAG) === 'true'
+    const defaultMinPowStr = window.localStorage.getItem(StorageKey.DEFAULT_MIN_POW)
+    if (defaultMinPowStr !== null) {
+      const defaultMinPow = Number(defaultMinPowStr)
+      if (Number.isInteger(defaultMinPow) && defaultMinPow >= 0 && defaultMinPow <= 28) {
+        this.defaultMinPow = defaultMinPow
+      }
+    }
     const quickReactionEmojiStr =
       window.localStorage.getItem(StorageKey.QUICK_REACTION_EMOJI) ?? '+'
     if (quickReactionEmojiStr.startsWith('{')) {
@@ -294,6 +467,85 @@ class LocalStorageService {
       }
     }
 
+    const encryptionKeyPrivkeyMapStr = window.localStorage.getItem(
+      StorageKey.ENCRYPTION_KEY_PRIVKEY_MAP
+    )
+    if (encryptionKeyPrivkeyMapStr) {
+      try {
+        const map = JSON.parse(encryptionKeyPrivkeyMapStr)
+        if (typeof map === 'object' && map !== null) {
+          this.encryptionKeyPrivkeyMap = map
+        }
+      } catch {
+        // Invalid JSON, use default
+      }
+    }
+
+    const retiredEncryptionKeyMapStr = window.localStorage.getItem(
+      StorageKey.RETIRED_ENCRYPTION_KEY_PRIVKEY_MAP
+    )
+    if (retiredEncryptionKeyMapStr) {
+      try {
+        const map = JSON.parse(retiredEncryptionKeyMapStr)
+        if (typeof map === 'object' && map !== null) {
+          this.retiredEncryptionKeyMap = map
+        }
+      } catch {
+        // Invalid JSON, use default
+      }
+    }
+
+    const lastReadDmTimeMapStr = window.localStorage.getItem(StorageKey.LAST_READ_DM_TIME_MAP)
+    if (lastReadDmTimeMapStr) {
+      try {
+        const map = JSON.parse(lastReadDmTimeMapStr)
+        if (typeof map === 'object' && map !== null) {
+          this.lastReadDmTimeMap = map
+        }
+      } catch {
+        // Invalid JSON, use default
+      }
+    }
+
+    const dmLastSyncedAtMapStr = window.localStorage.getItem(StorageKey.DM_LAST_SYNCED_AT_MAP)
+    if (dmLastSyncedAtMapStr) {
+      try {
+        const map = JSON.parse(dmLastSyncedAtMapStr)
+        if (typeof map === 'object' && map !== null) {
+          this.dmLastSyncedAtMap = map
+        }
+      } catch {
+        // Invalid JSON, use default
+      }
+    }
+
+    const dmBackwardCursorMapStr = window.localStorage.getItem(StorageKey.DM_BACKWARD_CURSOR_MAP)
+    if (dmBackwardCursorMapStr) {
+      try {
+        const map = JSON.parse(dmBackwardCursorMapStr)
+        if (typeof map === 'object' && map !== null) {
+          this.dmBackwardCursorMap = map
+        }
+      } catch {
+        // Invalid JSON, use default
+      }
+    }
+
+    const processedSyncRequestIdsStr = window.localStorage.getItem(
+      StorageKey.PROCESSED_SYNC_REQUEST_IDS
+    )
+    if (processedSyncRequestIdsStr) {
+      try {
+        this.processedSyncRequestIds = this.normalizeProcessedSyncRequestIds(
+          JSON.parse(processedSyncRequestIdsStr)
+        )
+        this.pruneProcessedSyncRequestIds()
+        this.persistProcessedSyncRequestIds()
+      } catch {
+        // Invalid JSON, use default
+      }
+    }
+
     const defaultRelayUrlsStr = window.localStorage.getItem(StorageKey.DEFAULT_RELAY_URLS)
     if (defaultRelayUrlsStr) {
       try {
@@ -307,6 +559,34 @@ class LocalStorageService {
         }
       } catch {
         // Invalid JSON, use default
+      }
+    }
+
+    const searchRelayUrlsStr = window.localStorage.getItem(StorageKey.SEARCH_RELAY_URLS)
+    if (searchRelayUrlsStr) {
+      try {
+        const urls = JSON.parse(searchRelayUrlsStr)
+        if (
+          Array.isArray(urls) &&
+          urls.length > 0 &&
+          urls.every((url) => typeof url === 'string')
+        ) {
+          this.searchRelayUrls = urls
+        }
+      } catch {
+        // Invalid JSON, use default
+      }
+    }
+
+    const searchHistoryStr = window.localStorage.getItem(StorageKey.SEARCH_HISTORY)
+    if (searchHistoryStr) {
+      try {
+        const history = JSON.parse(searchHistoryStr)
+        if (Array.isArray(history)) {
+          this.searchHistory = history
+        }
+      } catch {
+        // ignore
       }
     }
 
@@ -325,6 +605,21 @@ class LocalStorageService {
     this.hideIndirectNotifications =
       window.localStorage.getItem(StorageKey.HIDE_INDIRECT_NOTIFICATIONS) === 'true'
 
+    this.disableNotificationSync =
+      window.localStorage.getItem(StorageKey.DISABLE_NOTIFICATION_SYNC) === 'true'
+
+    this.systemNotificationsEnabled =
+      window.localStorage.getItem(StorageKey.SYSTEM_NOTIFICATIONS_ENABLED) === 'true'
+
+    this.systemGeneralNotificationsEnabled =
+      window.localStorage.getItem(StorageKey.SYSTEM_GENERAL_NOTIFICATIONS_ENABLED) !== 'false'
+
+    this.systemDmNotificationsEnabled =
+      window.localStorage.getItem(StorageKey.SYSTEM_DM_NOTIFICATIONS_ENABLED) !== 'false'
+
+    this.systemNotificationsPrompted =
+      window.localStorage.getItem(StorageKey.SYSTEM_NOTIFICATIONS_PROMPTED) === 'true'
+
     // Clean up deprecated data
     window.localStorage.removeItem(StorageKey.PINNED_PUBKEYS)
     window.localStorage.removeItem(StorageKey.ACCOUNT_PROFILE_EVENT_MAP)
@@ -335,6 +630,92 @@ class LocalStorageService {
     window.localStorage.removeItem(StorageKey.ACTIVE_RELAY_SET_ID)
     window.localStorage.removeItem(StorageKey.FEED_TYPE)
     window.localStorage.removeItem(StorageKey.ENABLE_LIVE_FEED)
+    window.localStorage.removeItem(StorageKey.CLIENT_KEY_PRIVKEY_MAP)
+
+    // In-memory maps above are loaded once; without this, a write in another tab
+    // of the same browser would never reach this tab's caches (localStorage is
+    // shared on disk, but each tab parses it into its own memory). Keep the
+    // DM-key caches in sync so cross-tab key rotation is observed here too.
+    // (Electron stores secrets via IPC, not localStorage, so this is a no-op there.)
+    window.addEventListener('storage', this.handleCrossTabStorage)
+  }
+
+  private handleCrossTabStorage = (event: StorageEvent) => {
+    // The browser only fires 'storage' for changes made by *other* tabs, so our
+    // own writes never re-enter here. Ignore unrelated storage areas/keys.
+    if (event.storageArea && event.storageArea !== window.localStorage) return
+    switch (event.key) {
+      case StorageKey.ENCRYPTION_KEY_PRIVKEY_MAP:
+        this.encryptionKeyPrivkeyMap = this.parseStoredRecord(event.newValue)
+        break
+      case StorageKey.RETIRED_ENCRYPTION_KEY_PRIVKEY_MAP:
+        this.retiredEncryptionKeyMap = this.parseStoredRecord(event.newValue)
+        break
+      case StorageKey.PROCESSED_SYNC_REQUEST_IDS: {
+        this.processedSyncRequestIds = this.parseProcessedSyncRequestIds(event.newValue)
+        break
+      }
+      case StorageKey.SYSTEM_NOTIFICATIONS_ENABLED:
+        this.systemNotificationsEnabled = event.newValue === 'true'
+        break
+      case StorageKey.SYSTEM_GENERAL_NOTIFICATIONS_ENABLED:
+        this.systemGeneralNotificationsEnabled = event.newValue !== 'false'
+        break
+      case StorageKey.SYSTEM_DM_NOTIFICATIONS_ENABLED:
+        this.systemDmNotificationsEnabled = event.newValue !== 'false'
+        break
+      case StorageKey.SYSTEM_NOTIFICATIONS_PROMPTED:
+        this.systemNotificationsPrompted = event.newValue === 'true'
+        break
+    }
+  }
+
+  private parseStoredRecord<T>(raw: string | null): Record<string, T> {
+    if (!raw) return {}
+    try {
+      const parsed = JSON.parse(raw)
+      return typeof parsed === 'object' && parsed !== null ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+
+  private parseProcessedSyncRequestIds(raw: string | null): TProcessedSyncRequestIdMap {
+    if (!raw) return {}
+    try {
+      return this.normalizeProcessedSyncRequestIds(JSON.parse(raw))
+    } catch {
+      return {}
+    }
+  }
+
+  private normalizeProcessedSyncRequestIds(value: unknown): TProcessedSyncRequestIdMap {
+    const now = Date.now()
+    const entries: TProcessedSyncRequestIdMap = {}
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === 'string') {
+          entries[item] = now
+          continue
+        }
+
+        if (typeof item !== 'object' || item === null) continue
+        const id = (item as { id?: unknown }).id
+        const processedAt = (item as { processedAt?: unknown }).processedAt
+        if (typeof id === 'string') {
+          entries[id] = typeof processedAt === 'number' ? processedAt : now
+        }
+      }
+    } else if (typeof value === 'object' && value !== null) {
+      for (const [id, processedAt] of Object.entries(value)) {
+        if (typeof processedAt === 'number') {
+          entries[id] = processedAt
+        }
+      }
+    }
+
+    return entries
   }
 
   getRelaySets() {
@@ -355,66 +736,273 @@ class LocalStorageService {
     this.themeSetting = themeSetting
   }
 
-  getNoteListMode() {
-    return this.noteListMode
+  // getNoteListMode() {
+  //   return this.noteListMode
+  // }
+
+  // setNoteListMode(mode: string) {
+  //   window.localStorage.setItem(StorageKey.NOTE_LIST_MODE, mode)
+  //   this.noteListMode = mode
+  // }
+
+  getFeedTabs() {
+    return this.feedTabs
   }
 
-  setNoteListMode(mode: TNoteListMode) {
-    window.localStorage.setItem(StorageKey.NOTE_LIST_MODE, mode)
-    this.noteListMode = mode
+  setFeedTabs(tabs: TFeedTabConfig[]) {
+    this.feedTabs = tabs
+    window.localStorage.setItem(StorageKey.FEED_TABS, JSON.stringify(tabs))
+  }
+
+  /**
+   * Hydrate sensitive fields from secure storage. Must be awaited once at
+   * boot, before any code reads/writes secrets. In Web mode this is a no-op;
+   * in native apps it loads the encrypted secrets bundle from the platform store.
+   */
+  async hydrate(): Promise<void> {
+    if (this.secretsHydrated) return
+    const bridge = getNativeStorageBridge()
+    if (!bridge) {
+      this.secretsHydrated = true
+      return
+    }
+    // Native apps must never fall back to writing secrets into localStorage,
+    // even when secure storage is temporarily unavailable.
+    this.secretsViaNativeStorage = true
+
+    let hadPersistedClientKey = false
+    let available: boolean
+    try {
+      available = await bridge.secrets.isAvailable()
+    } catch {
+      available = false
+    }
+
+    if (available) {
+      try {
+        const bundle = await bridge.secrets.load()
+        hadPersistedClientKey = 'clientKeyPrivkey' in bundle
+        this.nsecByPubkey = { ...(bundle.nsec ?? {}) }
+        this.ncryptsecByPubkey = { ...(bundle.ncryptsec ?? {}) }
+        this.bunkerClientSecretByPubkey = { ...(bundle.bunkerClientSecretKey ?? {}) }
+        this.encryptionKeyPrivkeyMap = { ...(bundle.encryptionKeyPrivkey ?? {}) }
+        this.retiredEncryptionKeyMap = { ...(bundle.retiredEncryptionKeyPrivkey ?? {}) }
+      } catch (err) {
+        this.secretsWriteBlocked = true
+        console.error('[storage] failed to load encrypted secrets:', err)
+      }
+    } else {
+      this.secretsWriteBlocked = true
+      console.warn(
+        '[storage] secure storage not available — secrets stay in-memory and will be lost on quit'
+      )
+    }
+
+    if (isAndroid() && this.secretsWriteBlocked) {
+      throw new Error('Android secure storage could not be opened')
+    }
+
+    this.secretsHydrated = true
+    if (hadPersistedClientKey) this.queueSecretsSave()
+
+    // Defensive cleanup: scrub any plaintext that lingered in localStorage.
+    window.localStorage.removeItem(StorageKey.ENCRYPTION_KEY_PRIVKEY_MAP)
+    window.localStorage.removeItem(StorageKey.RETIRED_ENCRYPTION_KEY_PRIVKEY_MAP)
+    window.localStorage.removeItem(StorageKey.CLIENT_KEY_PRIVKEY_MAP)
+    window.localStorage.setItem(StorageKey.ACCOUNTS, JSON.stringify(this.serializeAccounts()))
+    if (this.currentAccount) {
+      window.localStorage.setItem(
+        StorageKey.CURRENT_ACCOUNT,
+        JSON.stringify(this.serializeAccount(this.currentAccount))
+      )
+    }
+  }
+
+  /**
+   * Pulls inline nsec/ncryptsec/bunkerClientSecretKey out of the accounts
+   * array (and currentAccount) and into per-pubkey maps. Idempotent.
+   */
+  private peelInlineSecrets() {
+    for (const act of this.accounts) {
+      if (act.nsec) this.nsecByPubkey[act.pubkey] = act.nsec
+      if (act.ncryptsec) this.ncryptsecByPubkey[act.pubkey] = act.ncryptsec
+      if (act.bunkerClientSecretKey) {
+        this.bunkerClientSecretByPubkey[act.pubkey] = act.bunkerClientSecretKey
+      }
+    }
+    if (this.currentAccount) {
+      const act = this.currentAccount
+      if (act.nsec) this.nsecByPubkey[act.pubkey] = act.nsec
+      if (act.ncryptsec) this.ncryptsecByPubkey[act.pubkey] = act.ncryptsec
+      if (act.bunkerClientSecretKey) {
+        this.bunkerClientSecretByPubkey[act.pubkey] = act.bunkerClientSecretKey
+      }
+    }
+  }
+
+  /**
+   * Returns a copy of the account with the per-pubkey secret fields re-attached.
+   * Consumers receive accounts with secrets visible (back-compat); internal
+   * state stores secrets in maps only.
+   */
+  private hydrateAccount(account: TAccount): TAccount {
+    return {
+      ...account,
+      nsec: this.nsecByPubkey[account.pubkey] ?? account.nsec,
+      ncryptsec: this.ncryptsecByPubkey[account.pubkey] ?? account.ncryptsec,
+      bunkerClientSecretKey:
+        this.bunkerClientSecretByPubkey[account.pubkey] ?? account.bunkerClientSecretKey
+    }
+  }
+
+  /** Shape an account for persistence: web inlines secrets, native apps strip them. */
+  private serializeAccount(account: TAccount): TAccount {
+    if (this.secretsViaNativeStorage) {
+      const stripped: TAccount = { ...account }
+      delete stripped.nsec
+      delete stripped.ncryptsec
+      delete stripped.bunkerClientSecretKey
+      return stripped
+    }
+    return this.hydrateAccount(account)
+  }
+
+  private serializeAccounts(): TAccount[] {
+    return this.accounts.map((a) => this.serializeAccount(a))
+  }
+
+  private persistAccountsToLocalStorage() {
+    window.localStorage.setItem(StorageKey.ACCOUNTS, JSON.stringify(this.serializeAccounts()))
+  }
+
+  private persistCurrentAccountToLocalStorage() {
+    if (this.currentAccount) {
+      window.localStorage.setItem(
+        StorageKey.CURRENT_ACCOUNT,
+        JSON.stringify(this.serializeAccount(this.currentAccount))
+      )
+    } else {
+      window.localStorage.removeItem(StorageKey.CURRENT_ACCOUNT)
+    }
+  }
+
+  private persistEncryptionKeyMap() {
+    if (this.secretsViaNativeStorage) {
+      this.queueSecretsSave()
+    } else {
+      window.localStorage.setItem(
+        StorageKey.ENCRYPTION_KEY_PRIVKEY_MAP,
+        JSON.stringify(this.encryptionKeyPrivkeyMap)
+      )
+    }
+  }
+
+  private persistRetiredEncryptionKeyMap() {
+    if (this.secretsViaNativeStorage) {
+      this.queueSecretsSave()
+    } else {
+      window.localStorage.setItem(
+        StorageKey.RETIRED_ENCRYPTION_KEY_PRIVKEY_MAP,
+        JSON.stringify(this.retiredEncryptionKeyMap)
+      )
+    }
+  }
+
+  private queueSecretsSave() {
+    if (!this.secretsHydrated || this.secretsWriteBlocked) return
+    const bridge = getNativeStorageBridge()
+    if (!bridge) return
+    const snapshot = {
+      nsec: { ...this.nsecByPubkey },
+      ncryptsec: { ...this.ncryptsecByPubkey },
+      bunkerClientSecretKey: { ...this.bunkerClientSecretByPubkey },
+      encryptionKeyPrivkey: { ...this.encryptionKeyPrivkeyMap },
+      retiredEncryptionKeyPrivkey: { ...this.retiredEncryptionKeyMap }
+    }
+    this.secretsWriteChain = this.secretsWriteChain
+      .catch(() => {
+        // swallow so chain stays alive
+      })
+      .then(() =>
+        bridge.secrets.save(snapshot).catch((err) => {
+          console.error('[storage] failed to persist encrypted secrets:', err)
+        })
+      )
   }
 
   getAccounts() {
-    return this.accounts
+    return this.accounts.map((a) => this.hydrateAccount(a))
   }
 
   findAccount(account: TAccountPointer) {
-    return this.accounts.find((act) => isSameAccount(act, account))
+    const found = this.accounts.find((act) => isSameAccount(act, account))
+    return found ? this.hydrateAccount(found) : undefined
   }
 
   getCurrentAccount() {
-    return this.currentAccount
+    return this.currentAccount ? this.hydrateAccount(this.currentAccount) : null
   }
 
   getAccountNsec(pubkey: string) {
-    const account = this.accounts.find((act) => act.pubkey === pubkey && act.signerType === 'nsec')
-    return account?.nsec
+    return this.nsecByPubkey[pubkey]
   }
 
   getAccountNcryptsec(pubkey: string) {
-    const account = this.accounts.find(
-      (act) => act.pubkey === pubkey && act.signerType === 'ncryptsec'
-    )
-    return account?.ncryptsec
+    return this.ncryptsecByPubkey[pubkey]
+  }
+
+  getBunkerClientSecretKey(pubkey: string) {
+    return this.bunkerClientSecretByPubkey[pubkey]
   }
 
   addAccount(account: TAccount) {
+    if (account.nsec) this.nsecByPubkey[account.pubkey] = account.nsec
+    if (account.ncryptsec) this.ncryptsecByPubkey[account.pubkey] = account.ncryptsec
+    if (account.bunkerClientSecretKey) {
+      this.bunkerClientSecretByPubkey[account.pubkey] = account.bunkerClientSecretKey
+    }
+
+    // Internal accounts array stores stripped copies; we re-attach on read.
+    const stripped: TAccount = { ...account }
+    delete stripped.nsec
+    delete stripped.ncryptsec
+    delete stripped.bunkerClientSecretKey
+
     const index = this.accounts.findIndex((act) => isSameAccount(act, account))
     if (index !== -1) {
-      this.accounts[index] = account
+      this.accounts[index] = stripped
     } else {
-      this.accounts.push(account)
+      this.accounts.push(stripped)
     }
-    window.localStorage.setItem(StorageKey.ACCOUNTS, JSON.stringify(this.accounts))
-    return this.accounts
+    this.persistAccountsToLocalStorage()
+    if (this.secretsViaNativeStorage) this.queueSecretsSave()
+    return this.getAccounts()
   }
 
   removeAccount(account: TAccount) {
     this.accounts = this.accounts.filter((act) => !isSameAccount(act, account))
-    window.localStorage.setItem(StorageKey.ACCOUNTS, JSON.stringify(this.accounts))
-    return this.accounts
+    if (isSameAccount(this.currentAccount, account)) {
+      this.currentAccount = null
+      this.persistCurrentAccountToLocalStorage()
+    }
+    delete this.nsecByPubkey[account.pubkey]
+    delete this.ncryptsecByPubkey[account.pubkey]
+    delete this.bunkerClientSecretByPubkey[account.pubkey]
+    this.persistAccountsToLocalStorage()
+    if (this.secretsViaNativeStorage) this.queueSecretsSave()
+    return this.getAccounts()
   }
 
   switchAccount(account: TAccount | null) {
-    if (isSameAccount(this.currentAccount, account)) {
+    if (!account) {
       return
     }
-    const act = this.accounts.find((act) => isSameAccount(act, account))
+    const act = this.accounts.find((a) => isSameAccount(a, account))
     if (!act) {
       return
     }
     this.currentAccount = act
-    window.localStorage.setItem(StorageKey.CURRENT_ACCOUNT, JSON.stringify(act))
+    this.persistCurrentAccountToLocalStorage()
   }
 
   getDefaultZapSats() {
@@ -454,6 +1042,15 @@ class LocalStorageService {
       StorageKey.LAST_READ_NOTIFICATION_TIME_MAP,
       JSON.stringify(this.lastReadNotificationTimeMap)
     )
+  }
+
+  getNotificationTabs() {
+    return this.notificationTabs
+  }
+
+  setNotificationTabs(tabs: TNotificationTabConfig[]) {
+    this.notificationTabs = tabs
+    window.localStorage.setItem(StorageKey.NOTIFICATION_TABS, JSON.stringify(tabs))
   }
 
   getFeedInfo(pubkey: string) {
@@ -499,7 +1096,7 @@ class LocalStorageService {
   }
 
   getMediaUploadServiceConfig(pubkey?: string | null): TMediaUploadServiceConfig {
-    const defaultConfig = { type: 'nip96', service: this.mediaUploadService } as const
+    const defaultConfig = { type: 'blossom' } as const
     if (!pubkey) {
       return defaultConfig
     }
@@ -527,6 +1124,24 @@ class LocalStorageService {
     window.localStorage.setItem(StorageKey.DISMISSED_TOO_MANY_RELAYS_ALERT, dismissed.toString())
   }
 
+  getDismissedDesktopAppTip() {
+    return this.dismissedDesktopAppTip
+  }
+
+  setDismissedDesktopAppTip(dismissed: boolean) {
+    this.dismissedDesktopAppTip = dismissed
+    window.localStorage.setItem(StorageKey.DISMISSED_DESKTOP_APP_TIP, dismissed.toString())
+  }
+
+  getDismissedPsstPsstPromotion() {
+    return this.dismissedPsstPsstPromotion
+  }
+
+  setDismissedPsstPsstPromotion(dismissed: boolean) {
+    this.dismissedPsstPsstPromotion = dismissed
+    window.localStorage.setItem(StorageKey.DISMISSED_PSSTPSST_PROMOTION, dismissed.toString())
+  }
+
   getShowKinds() {
     return this.showKinds
   }
@@ -534,6 +1149,25 @@ class LocalStorageService {
   setShowKinds(kinds: number[]) {
     this.showKinds = kinds
     window.localStorage.setItem(StorageKey.SHOW_KINDS, JSON.stringify(kinds))
+  }
+
+  getShowKindsMap() {
+    return this.showKindsMap
+  }
+
+  getShowKindsForFeed(feedId: string): number[] {
+    return this.showKindsMap[feedId] ?? this.showKinds
+  }
+
+  setShowKindsForFeed(feedId: string, kinds: number[]) {
+    this.showKindsMap = { ...this.showKindsMap, [feedId]: kinds }
+    window.localStorage.setItem(StorageKey.SHOW_KINDS_MAP, JSON.stringify(this.showKindsMap))
+  }
+
+  clearShowKindsForFeed(feedId: string) {
+    const { [feedId]: _, ...rest } = this.showKindsMap
+    this.showKindsMap = rest
+    window.localStorage.setItem(StorageKey.SHOW_KINDS_MAP, JSON.stringify(this.showKindsMap))
   }
 
   getHideContentMentioningMutedUsers() {
@@ -565,6 +1199,15 @@ class LocalStorageService {
 
   getProfilePictureAutoLoadPolicy() {
     return this.profilePictureAutoLoadPolicy
+  }
+
+  getShowLinkPreviews() {
+    return this.showLinkPreviews
+  }
+
+  setShowLinkPreviews(show: boolean) {
+    this.showLinkPreviews = show
+    window.localStorage.setItem(StorageKey.SHOW_LINK_PREVIEWS, show.toString())
   }
 
   setProfilePictureAutoLoadPolicy(policy: TProfilePictureAutoLoadPolicy) {
@@ -614,6 +1257,24 @@ class LocalStorageService {
     window.localStorage.setItem(StorageKey.ENABLE_SINGLE_COLUMN_LAYOUT, enable.toString())
   }
 
+  getEnableDm() {
+    return supportsDirectMessages() && this.enableDm
+  }
+
+  setEnableDm(enable: boolean) {
+    this.enableDm = supportsDirectMessages() && enable
+    window.localStorage.setItem(StorageKey.ENABLE_DM, this.enableDm.toString())
+  }
+
+  getUseNip22Replies() {
+    return this.useNip22Replies
+  }
+
+  setUseNip22Replies(use: boolean) {
+    this.useNip22Replies = use
+    window.localStorage.setItem(StorageKey.USE_NIP22_REPLIES, use.toString())
+  }
+
   getFaviconUrlTemplate() {
     return this.faviconUrlTemplate
   }
@@ -632,6 +1293,33 @@ class LocalStorageService {
     window.localStorage.setItem(StorageKey.FILTER_OUT_ONION_RELAYS, filterOut.toString())
   }
 
+  getAllowInsecureConnection() {
+    return this.allowInsecureConnection
+  }
+
+  setAllowInsecureConnection(allow: boolean) {
+    this.allowInsecureConnection = allow
+    window.localStorage.setItem(StorageKey.ALLOW_INSECURE_CONNECTION, allow.toString())
+  }
+
+  getBlossomCacheServerUrl() {
+    return this.blossomCacheServerUrl
+  }
+
+  setBlossomCacheServerUrl(url: string) {
+    this.blossomCacheServerUrl = url
+    window.localStorage.setItem(StorageKey.BLOSSOM_CACHE_SERVER_URL, url)
+  }
+
+  getBlossomCacheServerEnabled() {
+    return this.blossomCacheServerEnabled
+  }
+
+  setBlossomCacheServerEnabled(enabled: boolean) {
+    this.blossomCacheServerEnabled = enabled
+    window.localStorage.setItem(StorageKey.BLOSSOM_CACHE_SERVER_ENABLED, enabled.toString())
+  }
+
   getQuickReaction() {
     return this.quickReaction
   }
@@ -639,6 +1327,28 @@ class LocalStorageService {
   setQuickReaction(quickReaction: boolean) {
     this.quickReaction = quickReaction
     window.localStorage.setItem(StorageKey.QUICK_REACTION, quickReaction.toString())
+  }
+
+  getAddClientTag() {
+    return this.addClientTag
+  }
+
+  setAddClientTag(addClientTag: boolean) {
+    this.addClientTag = addClientTag
+    window.localStorage.setItem(StorageKey.ADD_CLIENT_TAG, addClientTag.toString())
+  }
+
+  getDefaultMinPow() {
+    return this.defaultMinPow
+  }
+
+  setDefaultMinPow(minPow: number | null) {
+    this.defaultMinPow = minPow
+    if (minPow === null) {
+      window.localStorage.removeItem(StorageKey.DEFAULT_MIN_POW)
+    } else {
+      window.localStorage.setItem(StorageKey.DEFAULT_MIN_POW, minPow.toString())
+    }
   }
 
   getQuickReactionEmoji() {
@@ -691,13 +1401,81 @@ class LocalStorageService {
     window.localStorage.setItem(StorageKey.DEFAULT_RELAY_URLS, JSON.stringify(urls))
   }
 
+  getSearchRelayUrls() {
+    return this.searchRelayUrls
+  }
+
+  setSearchRelayUrls(urls: string[]) {
+    this.searchRelayUrls = urls
+    window.localStorage.setItem(StorageKey.SEARCH_RELAY_URLS, JSON.stringify(urls))
+  }
+
+  getSearchHistory() {
+    return this.searchHistory
+  }
+
+  addSearchHistory(text: string) {
+    if (!text) return
+    this.searchHistory = [text, ...this.searchHistory.filter((h) => h !== text)].slice(0, 20)
+    window.localStorage.setItem(StorageKey.SEARCH_HISTORY, JSON.stringify(this.searchHistory))
+  }
+
+  removeSearchHistory(index: number) {
+    this.searchHistory = this.searchHistory.filter((_, i) => i !== index)
+    window.localStorage.setItem(StorageKey.SEARCH_HISTORY, JSON.stringify(this.searchHistory))
+  }
+
+  clearSearchHistory() {
+    this.searchHistory = []
+    window.localStorage.removeItem(StorageKey.SEARCH_HISTORY)
+  }
+
   getMutedWords() {
+    const stored = window.localStorage.getItem(StorageKey.MUTED_WORDS)
+    if (!stored) {
+      this.mutedWords = []
+      return this.mutedWords
+    }
+    try {
+      const words = JSON.parse(stored)
+      if (Array.isArray(words) && words.every((word) => typeof word === 'string')) {
+        this.mutedWords = words
+      }
+    } catch {
+      // Keep the last valid value until local storage is repaired.
+    }
     return this.mutedWords
   }
 
-  setMutedWords(words: string[]) {
-    this.mutedWords = words
-    window.localStorage.setItem(StorageKey.MUTED_WORDS, JSON.stringify(this.mutedWords))
+  hasMigratedMutedWords(pubkey: string) {
+    try {
+      const pubkeys = JSON.parse(
+        window.localStorage.getItem(StorageKey.MUTED_WORDS_MIGRATED_PUBKEYS) ?? '[]'
+      )
+      return Array.isArray(pubkeys) && pubkeys.includes(pubkey)
+    } catch {
+      return false
+    }
+  }
+
+  markMutedWordsMigrated(pubkey: string) {
+    const pubkeys = this.getMutedWordsMigratedPubkeys()
+    if (pubkeys.includes(pubkey)) return
+    window.localStorage.setItem(
+      StorageKey.MUTED_WORDS_MIGRATED_PUBKEYS,
+      JSON.stringify([...pubkeys, pubkey])
+    )
+  }
+
+  private getMutedWordsMigratedPubkeys(): string[] {
+    try {
+      const pubkeys = JSON.parse(
+        window.localStorage.getItem(StorageKey.MUTED_WORDS_MIGRATED_PUBKEYS) ?? '[]'
+      )
+      return Array.isArray(pubkeys) ? pubkeys.filter((key) => typeof key === 'string') : []
+    } catch {
+      return []
+    }
   }
 
   getHideIndirectNotifications() {
@@ -707,6 +1485,174 @@ class LocalStorageService {
   setHideIndirectNotifications(onlyShow: boolean) {
     this.hideIndirectNotifications = onlyShow
     window.localStorage.setItem(StorageKey.HIDE_INDIRECT_NOTIFICATIONS, onlyShow.toString())
+  }
+
+  getEncryptionKeyPrivkey(accountPubkey: string): string | null {
+    return this.encryptionKeyPrivkeyMap[accountPubkey] ?? null
+  }
+
+  setEncryptionKeyPrivkey(accountPubkey: string, privkey: string) {
+    this.encryptionKeyPrivkeyMap[accountPubkey] = privkey
+    this.persistEncryptionKeyMap()
+  }
+
+  removeEncryptionKeyPrivkey(accountPubkey: string) {
+    delete this.encryptionKeyPrivkeyMap[accountPubkey]
+    this.persistEncryptionKeyMap()
+  }
+
+  getRetiredEncryptionKeyPrivkeys(accountPubkey: string): { privkey: string; retiredAt: number }[] {
+    return this.retiredEncryptionKeyMap[accountPubkey] ?? []
+  }
+
+  addRetiredEncryptionKeyPrivkey(accountPubkey: string, privkey: string, retiredAt: number) {
+    const list = this.retiredEncryptionKeyMap[accountPubkey] ?? []
+    if (list.some((k) => k.privkey === privkey)) return
+    // Newest first; age/count pruning is owned by encryptionKeyService.
+    list.unshift({ privkey, retiredAt })
+    this.retiredEncryptionKeyMap[accountPubkey] = list
+    this.persistRetiredEncryptionKeyMap()
+  }
+
+  setRetiredEncryptionKeyPrivkeys(
+    accountPubkey: string,
+    list: { privkey: string; retiredAt: number }[]
+  ) {
+    if (list.length === 0) {
+      delete this.retiredEncryptionKeyMap[accountPubkey]
+    } else {
+      this.retiredEncryptionKeyMap[accountPubkey] = list
+    }
+    this.persistRetiredEncryptionKeyMap()
+  }
+
+  getLastReadDmTime(accountPubkey: string, conversationPubkey: string): number {
+    return this.lastReadDmTimeMap[accountPubkey]?.[conversationPubkey] ?? 0
+  }
+
+  setLastReadDmTime(accountPubkey: string, conversationPubkey: string, time: number) {
+    if (!this.lastReadDmTimeMap[accountPubkey]) {
+      this.lastReadDmTimeMap[accountPubkey] = {}
+    }
+    this.lastReadDmTimeMap[accountPubkey][conversationPubkey] = time
+    window.localStorage.setItem(
+      StorageKey.LAST_READ_DM_TIME_MAP,
+      JSON.stringify(this.lastReadDmTimeMap)
+    )
+  }
+
+  clearDmSyncState(accountPubkey: string) {
+    delete this.dmLastSyncedAtMap[accountPubkey]
+    delete this.dmBackwardCursorMap[accountPubkey]
+    window.localStorage.setItem(
+      StorageKey.DM_LAST_SYNCED_AT_MAP,
+      JSON.stringify(this.dmLastSyncedAtMap)
+    )
+    window.localStorage.setItem(
+      StorageKey.DM_BACKWARD_CURSOR_MAP,
+      JSON.stringify(this.dmBackwardCursorMap)
+    )
+  }
+
+  getDmLastSyncedAt(accountPubkey: string): number {
+    return this.dmLastSyncedAtMap[accountPubkey] ?? 0
+  }
+
+  setDmLastSyncedAt(accountPubkey: string, time: number) {
+    this.dmLastSyncedAtMap[accountPubkey] = time
+    window.localStorage.setItem(
+      StorageKey.DM_LAST_SYNCED_AT_MAP,
+      JSON.stringify(this.dmLastSyncedAtMap)
+    )
+  }
+
+  getDmBackwardCursor(accountPubkey: string): number | undefined {
+    return this.dmBackwardCursorMap[accountPubkey]
+  }
+
+  setDmBackwardCursor(accountPubkey: string, cursor: number) {
+    this.dmBackwardCursorMap[accountPubkey] = cursor
+    window.localStorage.setItem(
+      StorageKey.DM_BACKWARD_CURSOR_MAP,
+      JSON.stringify(this.dmBackwardCursorMap)
+    )
+  }
+
+  getProcessedSyncRequestIds(): string[] {
+    return Object.keys(this.processedSyncRequestIds)
+  }
+
+  hasProcessedSyncRequestId(eventId: string): boolean {
+    return eventId in this.processedSyncRequestIds
+  }
+
+  addProcessedSyncRequestId(eventId: string) {
+    if (!(eventId in this.processedSyncRequestIds)) {
+      this.processedSyncRequestIds[eventId] = Date.now()
+      this.persistProcessedSyncRequestIds()
+    }
+  }
+
+  private pruneProcessedSyncRequestIds() {
+    const now = Date.now()
+    this.processedSyncRequestIds = Object.fromEntries(
+      Object.entries(this.processedSyncRequestIds).filter(
+        ([, processedAt]) => now - processedAt < PROCESSED_SYNC_REQUEST_ID_RETENTION_MS
+      )
+    )
+  }
+
+  private persistProcessedSyncRequestIds() {
+    window.localStorage.setItem(
+      StorageKey.PROCESSED_SYNC_REQUEST_IDS,
+      JSON.stringify(this.processedSyncRequestIds)
+    )
+  }
+
+  getDisableNotificationSync() {
+    return this.disableNotificationSync
+  }
+
+  setDisableNotificationSync(disable: boolean) {
+    this.disableNotificationSync = disable
+    window.localStorage.setItem(StorageKey.DISABLE_NOTIFICATION_SYNC, disable.toString())
+  }
+
+  getSystemNotificationsEnabled() {
+    return this.systemNotificationsEnabled
+  }
+
+  setSystemNotificationsEnabled(enabled: boolean) {
+    this.systemNotificationsEnabled = enabled
+    window.localStorage.setItem(StorageKey.SYSTEM_NOTIFICATIONS_ENABLED, enabled.toString())
+    window.dispatchEvent(new Event('system-notification-settings-change'))
+  }
+
+  getSystemGeneralNotificationsEnabled() {
+    return this.systemGeneralNotificationsEnabled
+  }
+
+  setSystemGeneralNotificationsEnabled(enabled: boolean) {
+    this.systemGeneralNotificationsEnabled = enabled
+    window.localStorage.setItem(StorageKey.SYSTEM_GENERAL_NOTIFICATIONS_ENABLED, enabled.toString())
+  }
+
+  getSystemDmNotificationsEnabled() {
+    return this.systemDmNotificationsEnabled
+  }
+
+  setSystemDmNotificationsEnabled(enabled: boolean) {
+    this.systemDmNotificationsEnabled = enabled
+    window.localStorage.setItem(StorageKey.SYSTEM_DM_NOTIFICATIONS_ENABLED, enabled.toString())
+  }
+
+  getSystemNotificationsPrompted() {
+    return this.systemNotificationsPrompted
+  }
+
+  setSystemNotificationsPrompted(prompted: boolean) {
+    this.systemNotificationsPrompted = prompted
+    window.localStorage.setItem(StorageKey.SYSTEM_NOTIFICATIONS_PROMPTED, prompted.toString())
   }
 }
 

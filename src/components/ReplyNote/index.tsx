@@ -2,6 +2,7 @@ import { useSecondaryPage } from '@/PageManager'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SPECIAL_TRUST_SCORE_FILTER_ID } from '@/constants'
+import { useFetchEvents } from '@/hooks/useFetchEvent'
 import { useThread } from '@/hooks/useThread'
 import { getEventKey, isMentioningMutedUsers } from '@/lib/event'
 import { toNote } from '@/lib/link'
@@ -13,17 +14,20 @@ import { useUserTrust } from '@/providers/UserTrustProvider'
 import { Event } from 'nostr-tools'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import ClickableCard from '../ClickableCard'
 import ClientTag from '../ClientTag'
 import Collapsible from '../Collapsible'
 import Content from '../Content'
 import { FormattedTimestamp } from '../FormattedTimestamp'
 import Nip05 from '../Nip05'
 import NoteOptions from '../NoteOptions'
+import OpBadge from '../OpBadge'
 import ParentNotePreview from '../ParentNotePreview'
+import PowBadge from '../PowBadge'
 import StuffStats from '../StuffStats'
 import TranslateButton from '../TranslateButton'
 import TrustScoreBadge from '../TrustScoreBadge'
-import UserAvatar from '../UserAvatar'
+import UserAvatar, { UserAvatarSkeleton } from '../UserAvatar'
 import Username from '../Username'
 
 export default function ReplyNote({
@@ -31,22 +35,31 @@ export default function ReplyNote({
   parentEventId,
   onClickParent = () => {},
   highlight = false,
-  className = ''
+  hideThreadGuide = false,
+  className = '',
+  opPubkey
 }: {
   event: Event
   parentEventId?: string
   onClickParent?: () => void
   highlight?: boolean
+  hideThreadGuide?: boolean
   className?: string
+  opPubkey?: string
 }) {
   const { t } = useTranslation()
   const { isSmallScreen } = useScreenSize()
   const { push } = useSecondaryPage()
   const { mutePubkeySet } = useMuteList()
   const { getMinTrustScore, meetsMinTrustScore } = useUserTrust()
-  const { hideContentMentioningMutedUsers } = useContentPolicy()
+  const { hideContentMentioningMutedUsers, autoLoadProfilePicture } = useContentPolicy()
   const eventKey = useMemo(() => getEventKey(event), [event])
-  const replies = useThread(eventKey)
+  const replyIds = useThread(eventKey)
+  const { eventsById: replyEventsById } = useFetchEvents(replyIds)
+  const replies = useMemo(
+    () => replyIds.flatMap((id) => (replyEventsById.get(id) ? [replyEventsById.get(id)!] : [])),
+    [replyIds, replyEventsById]
+  )
   const [showMuted, setShowMuted] = useState(false)
   const [hasReplies, setHasReplies] = useState(false)
 
@@ -97,7 +110,7 @@ export default function ReplyNote({
   ])
 
   return (
-    <div
+    <ClickableCard
       className={cn(
         'clickable relative pb-3 transition-colors duration-500',
         highlight ? 'bg-primary/40' : '',
@@ -105,29 +118,45 @@ export default function ReplyNote({
       )}
       onClick={() => push(toNote(event))}
     >
-      {hasReplies && <div className="absolute bottom-0 left-[34px] top-14 z-20 border-l" />}
-      <Collapsible>
-        <div className="flex items-start space-x-2 px-4 pt-3">
+      {hasReplies &&
+        !hideThreadGuide &&
+        (autoLoadProfilePicture ? (
+          <div className="bg-border absolute inset-s-8.25 top-14 bottom-0 z-0 w-0.5" />
+        ) : (
+          <div className="absolute inset-s-2 top-5 bottom-0 z-0 w-3 rounded-ss-lg border-s-2 border-t-2" />
+        ))}
+      {/* Include the nested reply indent in the clipping area for image strips. */}
+      <Collapsible className="-ms-[var(--reply-note-indent,0px)]">
+        <div
+          className={cn(
+            'flex items-start gap-2 pe-4 pt-3',
+            autoLoadProfilePicture || hideThreadGuide
+              ? 'ps-[calc(1rem+var(--reply-note-indent,0px))]'
+              : 'ps-[calc(1.75rem+var(--reply-note-indent,0px))]'
+          )}
+        >
           <UserAvatar userId={event.pubkey} size="medium" className="mt-0.5 shrink-0" />
-          <div className="w-full overflow-hidden">
+          <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-2">
               <div className="w-0 flex-1">
                 <div className="flex items-center gap-1">
                   <Username
                     userId={event.pubkey}
-                    className="truncate text-sm font-semibold text-muted-foreground hover:text-foreground"
+                    className="text-muted-foreground hover:text-foreground truncate text-sm font-semibold"
                     skeletonClassName="h-3"
                   />
-                  <TrustScoreBadge pubkey={event.pubkey} className="!size-3.5" />
+                  {opPubkey === event.pubkey && <OpBadge />}
+                  <TrustScoreBadge pubkey={event.pubkey} className="size-3.5!" />
                   <ClientTag event={event} />
                 </div>
-                <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                <div className="text-muted-foreground flex items-center gap-1 text-sm">
                   <Nip05 pubkey={event.pubkey} append="·" />
                   <FormattedTimestamp
                     timestamp={event.created_at}
                     className="shrink-0"
                     short={isSmallScreen}
                   />
+                  <PowBadge event={event} className="shrink-0" />
                 </div>
               </div>
               <div className="flex shrink-0 items-center">
@@ -146,11 +175,21 @@ export default function ReplyNote({
               />
             )}
             {show ? (
-              <Content className="mt-2" event={event} />
+              <Content
+                className={cn(
+                  'relative mt-2 [--image-strip-bleed:1rem]',
+                  autoLoadProfilePicture
+                    ? '[--image-strip-bleed-start:calc(3.75rem+var(--reply-note-indent,0px))]'
+                    : hideThreadGuide
+                      ? '[--image-strip-bleed-start:calc(1rem+var(--reply-note-indent,0px))]'
+                      : '[--image-strip-bleed-start:calc(1.75rem+var(--reply-note-indent,0px))]'
+                )}
+                event={event}
+              />
             ) : (
               <Button
                 variant="outline"
-                className="mt-2 font-medium text-muted-foreground"
+                className="text-muted-foreground mt-2 font-medium"
                 onClick={(e) => {
                   e.stopPropagation()
                   setShowMuted(true)
@@ -162,15 +201,34 @@ export default function ReplyNote({
           </div>
         </div>
       </Collapsible>
-      {show && <StuffStats className="ml-14 mr-4 mt-2 pl-1" stuff={event} displayTopZapsAndLikes />}
-    </div>
+      {show && (
+        <StuffStats
+          className={cn(
+            'me-4 mt-2 ps-1',
+            autoLoadProfilePicture ? 'ms-14' : hideThreadGuide ? 'ms-4' : 'ms-7'
+          )}
+          classNames={{
+            topList: cn(
+              '-me-4',
+              autoLoadProfilePicture ? '-ms-14' : hideThreadGuide ? '-ms-4' : '-ms-7'
+            ),
+            topListContent: cn(
+              'pe-4',
+              autoLoadProfilePicture ? 'ps-14' : hideThreadGuide ? 'ps-4' : 'ps-7'
+            )
+          }}
+          stuff={event}
+          displayTopZapsAndLikes
+        />
+      )}
+    </ClickableCard>
   )
 }
 
 export function ReplyNoteSkeleton() {
   return (
-    <div className="flex w-full items-start space-x-2 px-4 py-3">
-      <Skeleton className="mt-0.5 h-9 w-9 shrink-0 rounded-full" />
+    <div className="flex w-full items-start gap-2 px-4 py-3">
+      <UserAvatarSkeleton className="mt-0.5 h-9 w-9" />
       <div className="w-full">
         <div className="py-1">
           <Skeleton className="h-3 w-16" />

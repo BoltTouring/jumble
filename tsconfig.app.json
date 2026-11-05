@@ -3,12 +3,14 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@capacitor/core": ["./src/lib/capacitor-web.ts"],
+      "@capacitor/app": ["./src/lib/capacitor-web.ts"],
+      "@capacitor/local-notifications": ["./src/lib/capacitor-web.ts"]
     },
 
     /* Bundler mode */

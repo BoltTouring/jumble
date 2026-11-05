@@ -30,9 +30,15 @@ const ExternalContentPage = forwardRef(({ index }: { index?: number }, ref) => {
     >
       <div className="mt-3 px-4">
         <ExternalContent content={id} mustLoadMedia />
-        <StuffStats className="mt-3" stuff={id} fetchIfNotExisting displayTopZapsAndLikes />
+        <StuffStats
+          className="mt-3"
+          classNames={{ topList: '-mx-4', topListContent: 'px-4' }}
+          stuff={id}
+          fetchIfNotExisting
+          displayTopZapsAndLikes
+        />
       </div>
-      <Separator className="mt-4" />
+      <Separator className="mt-3" />
       <ExternalContentInteractions externalContent={id} />
     </SecondaryPageLayout>
   )

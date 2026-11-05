@@ -1,6 +1,11 @@
+import { supportsDirectMessages } from '@/lib/platform-capabilities'
+import AccountSettingsPage from '@/pages/secondary/AccountSettingsPage'
+import ArticleEditorPage from '@/pages/secondary/ArticleEditorPage'
 import AppearanceSettingsPage from '@/pages/secondary/AppearanceSettingsPage'
 import BookmarkPage from '@/pages/secondary/BookmarkPage'
+import DmConversationPage from '@/pages/secondary/DmConversationPage'
 import EmojiPackSettingsPage from '@/pages/secondary/EmojiPackSettingsPage'
+import EmojiSetEditorPage from '@/pages/secondary/EmojiSetEditorPage'
 import ExternalContentPage from '@/pages/secondary/ExternalContentPage'
 import FollowingListPage from '@/pages/secondary/FollowingListPage'
 import FollowPackPage from '@/pages/secondary/FollowPackPage'
@@ -8,17 +13,20 @@ import GeneralSettingsPage from '@/pages/secondary/GeneralSettingsPage'
 import MuteListPage from '@/pages/secondary/MuteListPage'
 import NoteListPage from '@/pages/secondary/NoteListPage'
 import NotePage from '@/pages/secondary/NotePage'
+import NotificationSettingsPage from '@/pages/secondary/NotificationSettingsPage'
 import OthersRelaySettingsPage from '@/pages/secondary/OthersRelaySettingsPage'
 import PostSettingsPage from '@/pages/secondary/PostSettingsPage'
 import ProfileEditorPage from '@/pages/secondary/ProfileEditorPage'
 import ProfileListPage from '@/pages/secondary/ProfileListPage'
 import ProfilePage from '@/pages/secondary/ProfilePage'
 import RelayPage from '@/pages/secondary/RelayPage'
+import RelayActivityPage from '@/pages/secondary/RelayActivityPage'
 import RelayReviewsPage from '@/pages/secondary/RelayReviewsPage'
 import RelaySettingsPage from '@/pages/secondary/RelaySettingsPage'
 import RizfulPage from '@/pages/secondary/RizfulPage'
 import SearchPage from '@/pages/secondary/SearchPage'
 import SettingsPage from '@/pages/secondary/SettingsPage'
+import StandaloneEmojiEditorPage from '@/pages/secondary/StandaloneEmojiEditorPage'
 import SystemSettingsPage from '@/pages/secondary/SystemSettingsPage'
 import TranslationPage from '@/pages/secondary/TranslationPage'
 import UserAggregationDetailPage from '@/pages/secondary/UserAggregationDetailPage'
@@ -27,14 +35,21 @@ import { match } from 'path-to-regexp'
 import { isValidElement } from 'react'
 
 // Right column routes
-const SECONDARY_ROUTE_CONFIGS = [
+const SECONDARY_ROUTE_CONFIGS: {
+  path: string
+  element: React.ReactElement | null
+  hideBottomBar?: boolean
+}[] = [
   { path: '/notes', element: <NoteListPage /> },
   { path: '/notes/:id', element: <NotePage /> },
+  { path: '/articles/new', element: <ArticleEditorPage />, hideBottomBar: true },
+  { path: '/articles/:id/edit', element: <ArticleEditorPage />, hideBottomBar: true },
   { path: '/users', element: <ProfileListPage /> },
   { path: '/users/:id', element: <ProfilePage /> },
   { path: '/users/:id/following', element: <FollowingListPage /> },
   { path: '/users/:id/relays', element: <OthersRelaySettingsPage /> },
   { path: '/relays/:url', element: <RelayPage /> },
+  { path: '/relays/:url/activity', element: <RelayActivityPage /> },
   { path: '/relays/:url/reviews', element: <RelayReviewsPage /> },
   { path: '/search', element: <SearchPage /> },
   { path: '/external-content', element: <ExternalContentPage /> },
@@ -43,20 +58,29 @@ const SECONDARY_ROUTE_CONFIGS = [
   { path: '/settings/wallet', element: <WalletPage /> },
   { path: '/settings/posts', element: <PostSettingsPage /> },
   { path: '/settings/general', element: <GeneralSettingsPage /> },
+  { path: '/settings/notifications', element: <NotificationSettingsPage /> },
   { path: '/settings/appearance', element: <AppearanceSettingsPage /> },
   { path: '/settings/translation', element: <TranslationPage /> },
   { path: '/settings/emoji-packs', element: <EmojiPackSettingsPage /> },
+  { path: '/emoji-set-editor', element: <EmojiSetEditorPage /> },
+  { path: '/emoji-set-editor/:id', element: <EmojiSetEditorPage /> },
+  { path: '/standalone-emoji-editor', element: <StandaloneEmojiEditorPage /> },
   { path: '/settings/system', element: <SystemSettingsPage /> },
+  { path: '/settings/account', element: <AccountSettingsPage /> },
   { path: '/profile-editor', element: <ProfileEditorPage /> },
   { path: '/mutes', element: <MuteListPage /> },
   { path: '/rizful', element: <RizfulPage /> },
   { path: '/bookmarks', element: <BookmarkPage /> },
   { path: '/follow-packs/:id', element: <FollowPackPage /> },
-  { path: '/user-aggregation/:feedId/:npub', element: <UserAggregationDetailPage /> }
+  { path: '/user-aggregation/:feedId/:npub', element: <UserAggregationDetailPage /> },
+  { path: '/dms/:pubkey', element: <DmConversationPage />, hideBottomBar: true }
 ]
 
-export const SECONDARY_ROUTES = SECONDARY_ROUTE_CONFIGS.map(({ path, element }) => ({
+export const SECONDARY_ROUTES = SECONDARY_ROUTE_CONFIGS.filter(
+  ({ path }) => path !== '/dms/:pubkey' || supportsDirectMessages()
+).map(({ path, element, hideBottomBar }) => ({
   path,
   element: isValidElement(element) ? element : null,
-  matcher: match(path)
+  matcher: match(path),
+  hideBottomBar: hideBottomBar ?? false
 }))

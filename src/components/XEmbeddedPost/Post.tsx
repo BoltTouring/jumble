@@ -1,6 +1,7 @@
 import { Skeleton } from '@/components/ui/skeleton'
+import { canHover } from '@/lib/device'
 import { toExternalContent } from '@/lib/link'
-import { cn, isTouchDevice } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { useSecondaryPage } from '@/PageManager'
 import { useTheme } from '@/providers/ThemeProvider'
 import { MessageCircle } from 'lucide-react'
@@ -18,78 +19,51 @@ const Post = memo(({ tweetId, url, className, embedded = true }: PostProps) => {
   const { t } = useTranslation()
   const { theme } = useTheme()
   const { push } = useSecondaryPage()
-  const supportTouch = useMemo(() => isTouchDevice(), [])
+  const supportsHover = useMemo(() => canHover(), [])
   const [loaded, setLoaded] = useState(false)
-  const loadingRef = useRef<boolean>(false)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const unmountedRef = useRef(false)
+  const [height, setHeight] = useState(225)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const iframeSrc = useMemo(() => {
+    const params = new URLSearchParams({
+      dnt: 'true',
+      frame: 'false',
+      hideCard: 'false',
+      hideThread: 'true',
+      id: tweetId,
+      theme: theme === 'light' ? 'light' : 'dark',
+      width: '550px'
+    })
+    return `https://platform.twitter.com/embed/Tweet.html?${params}`
+  }, [tweetId, theme])
 
   useEffect(() => {
-    unmountedRef.current = false
+    setLoaded(false)
+    setHeight(225)
 
-    if (!tweetId || !containerRef.current || loadingRef.current) return
-    loadingRef.current = true
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== 'https://platform.twitter.com') return
+      if (event.source !== iframeRef.current?.contentWindow) return
+      const message = event.data?.['twttr.embed'] as
+        | { method?: string; params?: { height?: number }[] }
+        | undefined
+      if (!message) return
 
-    // Load Twitter widgets script if not already loaded
-    if (!window.twttr) {
-      const script = document.createElement('script')
-      script.src = 'https://platform.twitter.com/widgets.js'
-      script.async = true
-      script.onload = () => {
-        if (!unmountedRef.current) {
-          embedTweet()
-        }
+      if (message.method === 'twttr.private.rendered') {
+        setLoaded(true)
+      } else if (
+        message.method === 'twttr.private.resize' &&
+        typeof message.params?.[0]?.height === 'number' &&
+        Number.isFinite(message.params[0].height)
+      ) {
+        setHeight(Math.max(225, Math.min(1_000, Math.ceil(message.params[0].height))))
       }
-      script.onerror = () => {
-        if (!unmountedRef.current) {
-          console.error('Failed to load Twitter widgets script')
-          loadingRef.current = false
-        }
-      }
-      document.body.appendChild(script)
-    } else {
-      embedTweet()
     }
 
-    function embedTweet() {
-      if (!containerRef.current || !window.twttr || !tweetId || unmountedRef.current) return
-
-      window.twttr.widgets
-        .createTweet(tweetId, containerRef.current, {
-          theme: theme === 'light' ? 'light' : 'dark',
-          dnt: true, // Do not track
-          conversation: 'none' // Hide conversation thread
-        })
-        .then((element: HTMLElement | undefined) => {
-          if (unmountedRef.current) return
-          if (element) {
-            setTimeout(() => {
-              if (!unmountedRef.current) {
-                setLoaded(true)
-              }
-            }, 100)
-          } else {
-            console.error('Failed to embed tweet')
-          }
-        })
-        .catch((error) => {
-          if (!unmountedRef.current) {
-            console.error('Error embedding tweet:', error)
-          }
-        })
-        .finally(() => {
-          loadingRef.current = false
-        })
-    }
-
+    window.addEventListener('message', handleMessage)
     return () => {
-      unmountedRef.current = true
-      // Clear the container to prevent memory leaks
-      if (containerRef.current) {
-        containerRef.current.innerHTML = ''
-      }
+      window.removeEventListener('message', handleMessage)
     }
-  }, [tweetId, theme])
+  }, [iframeSrc])
 
   const handleViewComments = useCallback(
     (e: React.MouseEvent) => {
@@ -101,23 +75,30 @@ const Post = memo(({ tweetId, url, className, embedded = true }: PostProps) => {
 
   return (
     <div
-      className={cn('group relative', className)}
+      className={cn('group relative rounded-lg', className)}
       style={{
-        maxWidth: '550px',
-        minHeight: '225px'
+        maxWidth: '550px'
       }}
     >
-      <div ref={containerRef} className="cursor-pointer" onClick={handleViewComments} />
+      <iframe
+        ref={iframeRef}
+        src={iframeSrc}
+        title={t('X post')}
+        sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+        scrolling="no"
+        className="block w-full overflow-hidden border-0"
+        style={{ height: height + 1 }}
+      />
       {!loaded && <Skeleton className="absolute inset-0 h-full w-full rounded-lg" />}
-      {loaded && embedded && !supportTouch && (
-        /* Hover overlay mask */
+      {loaded && embedded && supportsHover && (
+        /* Hover overlay */
         <div
-          className="absolute inset-0 flex cursor-pointer items-center justify-center rounded-lg bg-muted/40 opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100"
+          className="bg-background/40 absolute inset-0 flex cursor-pointer items-center justify-center rounded-lg border opacity-0 backdrop-blur-sm transition-opacity duration-200 ease-out group-hover:opacity-100"
           onClick={handleViewComments}
         >
-          <div className="flex flex-col items-center gap-3">
-            <MessageCircle className="size-12" strokeWidth={1.5} />
-            <span className="text-lg font-medium">{t('View Nostr comments')}</span>
+          <div className="bg-background text-foreground ring-border flex scale-95 items-center gap-2 rounded-full px-4 py-2 shadow-lg ring-1 transition-transform duration-200 ease-out group-hover:scale-100">
+            <MessageCircle className="size-4" strokeWidth={2} />
+            <span className="text-sm font-medium">{t('View Nostr comments')}</span>
           </div>
         </div>
       )}

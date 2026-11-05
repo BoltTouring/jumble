@@ -1,3 +1,4 @@
+import { withSignerApproval } from '@/lib/signer-approval'
 import { ISigner, TDraftEvent, TNip07 } from '@/types'
 
 export class Nip07Signer implements ISigner {
@@ -35,7 +36,7 @@ export class Nip07Signer implements ISigner {
     if (!this.signer) {
       throw new Error('Should call init() first')
     }
-    return await this.signer.signEvent(draftEvent)
+    return await withSignerApproval(this.signer.signEvent(draftEvent))
   }
 
   async nip04Encrypt(pubkey: string, plainText: string) {
@@ -56,5 +57,25 @@ export class Nip07Signer implements ISigner {
       throw new Error('The extension you are using does not support nip04 decryption')
     }
     return await this.signer.nip04.decrypt(pubkey, cipherText)
+  }
+
+  async nip44Encrypt(pubkey: string, plainText: string) {
+    if (!this.signer) {
+      throw new Error('Should call init() first')
+    }
+    if (!this.signer.nip44?.encrypt) {
+      throw new Error('The extension you are using does not support nip44 encryption')
+    }
+    return await this.signer.nip44.encrypt(pubkey, plainText)
+  }
+
+  async nip44Decrypt(pubkey: string, cipherText: string) {
+    if (!this.signer) {
+      throw new Error('Should call init() first')
+    }
+    if (!this.signer.nip44?.decrypt) {
+      throw new Error('The extension you are using does not support nip44 decryption')
+    }
+    return await this.signer.nip44.decrypt(pubkey, cipherText)
   }
 }

@@ -1,21 +1,22 @@
+import { copyText } from '@/lib/native-system'
 import Collapsible from '@/components/Collapsible'
 import FollowButton from '@/components/FollowButton'
 import Nip05 from '@/components/Nip05'
 import NpubQrCode from '@/components/NpubQrCode'
 import ProfileAbout from '@/components/ProfileAbout'
-import ProfileOptions from '@/components/ProfileOptions'
 import ProfileZapButton from '@/components/ProfileZapButton'
 import PubkeyCopy from '@/components/PubkeyCopy'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useFetchFollowings, useFetchProfile } from '@/hooks'
-import { toMuteList, toProfileEditor } from '@/lib/link'
+import { useDmSupport, useFetchFollowings, useFetchProfile } from '@/hooks'
+import { toDmConversation, toMuteList, toProfileEditor } from '@/lib/link'
 import { SecondaryPageLink, useSecondaryPage } from '@/PageManager'
 import { useMuteList } from '@/providers/MuteListProvider'
 import { useNostr } from '@/providers/NostrProvider'
+import { useUserPreferences } from '@/providers/UserPreferencesProvider'
 import client from '@/services/client.service'
-import { Link, Zap, Bitcoin, Check, Copy } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Bitcoin, Check, Copy, Link, MessageSquare, Zap } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import NotFound from '../NotFound'
 import SearchInput from '../SearchInput'
@@ -35,23 +36,18 @@ export default function Profile({ id }: { id?: string }) {
   const { push } = useSecondaryPage()
   const { profile, isFetching } = useFetchProfile(id)
   const { pubkey: accountPubkey } = useNostr()
+  const { enableDm } = useUserPreferences()
   const { mutePubkeySet } = useMuteList()
   const [searchInput, setSearchInput] = useState('')
   const [debouncedInput, setDebouncedInput] = useState(searchInput)
   const { followings } = useFetchFollowings(profile?.pubkey)
+  const { canStartDm, isLoading: isDmSupportLoading } = useDmSupport(profile?.pubkey)
   const isFollowingYou = useMemo(() => {
     return (
       !!accountPubkey && accountPubkey !== profile?.pubkey && followings.includes(accountPubkey)
     )
   }, [followings, profile, accountPubkey])
-  const [topContainerHeight, setTopContainerHeight] = useState(0)
   const isSelf = accountPubkey === profile?.pubkey
-  const [topContainer, setTopContainer] = useState<HTMLDivElement | null>(null)
-  const topContainerRef = useCallback((node: HTMLDivElement | null) => {
-    if (node) {
-      setTopContainer(node)
-    }
-  }, [])
 
   useEffect(() => {
     const handler = setTimeout(() => {
@@ -75,37 +71,17 @@ export default function Profile({ id }: { id?: string }) {
     forceUpdateCache()
   }, [profile?.pubkey])
 
-  useEffect(() => {
-    if (!topContainer) return
-
-    const checkHeight = () => {
-      setTopContainerHeight(topContainer.scrollHeight)
-    }
-
-    checkHeight()
-
-    const observer = new ResizeObserver(() => {
-      checkHeight()
-    })
-
-    observer.observe(topContainer)
-
-    return () => {
-      observer.disconnect()
-    }
-  }, [topContainer])
-
   if (!profile && isFetching) {
     return (
       <>
         <div>
           <div className="relative mb-2 bg-cover bg-center">
-            <Skeleton className="aspect-[3/1] w-full rounded-none" />
-            <Skeleton className="absolute bottom-0 left-3 h-24 w-24 translate-y-1/2 rounded-full border-4 border-background" />
+            <Skeleton className="aspect-3/1 w-full rounded-none" />
+            <Skeleton className="border-background absolute start-3 bottom-0 h-24 w-24 translate-y-1/2 rounded-full border-4" />
           </div>
         </div>
         <div className="px-4">
-          <Skeleton className="mb-1 mt-14 h-5 w-28" />
+          <Skeleton className="mt-14 mb-1 h-5 w-28" />
           <Skeleton className="my-1 mt-2 h-5 w-56 rounded-full" />
         </div>
       </>
@@ -116,14 +92,13 @@ export default function Profile({ id }: { id?: string }) {
   const { banner, username, about, pubkey, website, lightningAddress, sp, emojis } = profile
   return (
     <>
-      <div ref={topContainerRef}>
+      <div>
         <div className="relative mb-2 bg-cover bg-center">
           <BannerWithLightbox banner={banner} pubkey={pubkey} />
           <AvatarWithLightbox userId={pubkey} />
         </div>
         <div className="px-4">
           <div className="flex h-8 items-center justify-end gap-2">
-            <ProfileOptions pubkey={pubkey} />
             {isSelf ? (
               <Button
                 className="w-20 min-w-20 rounded-full"
@@ -135,6 +110,29 @@ export default function Profile({ id }: { id?: string }) {
             ) : (
               <>
                 {!!lightningAddress && <ProfileZapButton pubkey={pubkey} />}
+                {enableDm && (
+                  <span
+                    title={
+                      !isDmSupportLoading && !canStartDm
+                        ? t('This user has not set up NIP-4e DMs')
+                        : undefined
+                    }
+                    className={
+                      !isDmSupportLoading && !canStartDm ? 'cursor-not-allowed' : undefined
+                    }
+                  >
+                    <Button
+                      variant="secondary"
+                      size="icon"
+                      className="rounded-full"
+                      disabled={isDmSupportLoading || !canStartDm}
+                      onClick={() => push(toDmConversation(pubkey))}
+                      title={canStartDm ? t('Message') : undefined}
+                    >
+                      <MessageSquare className="h-4 w-4" />
+                    </Button>
+                  </span>
+                )}
                 <SpecialFollowButton pubkey={pubkey} />
                 <FollowButton pubkey={pubkey} />
               </>
@@ -145,24 +143,24 @@ export default function Profile({ id }: { id?: string }) {
               <TextWithEmojis
                 text={username}
                 emojis={emojis}
-                className="select-text truncate text-xl font-semibold"
+                className="truncate text-xl font-semibold select-text"
               />
               <TrustScoreBadge pubkey={pubkey} />
               {isFollowingYou && (
-                <div className="h-fit shrink-0 rounded-full bg-muted px-2 text-xs text-muted-foreground">
+                <div className="bg-muted text-muted-foreground h-fit shrink-0 rounded-full px-2 text-xs">
                   {t('Follows you')}
                 </div>
               )}
             </div>
             <Nip05 pubkey={pubkey} />
             {lightningAddress && (
-              <div className="flex select-text items-center gap-1 text-sm text-yellow-400">
+              <div className="flex items-center gap-1 text-sm text-yellow-400 select-text">
                 <Zap className="size-4 shrink-0" />
-                <div className="w-0 max-w-fit flex-1 truncate">{lightningAddress}</div>
+                <LightningAddressCopy lightningAddress={lightningAddress} />
               </div>
             )}
             {sp && (
-              <div className="flex select-text items-center gap-1 text-sm text-orange-500">
+              <div className="flex items-center gap-1 text-sm text-orange-500 select-text">
                 <Bitcoin className="size-4 shrink-0" />
                 <SpCopy sp={sp} />
                 <SpQrCode sp={sp} />
@@ -172,15 +170,15 @@ export default function Profile({ id }: { id?: string }) {
               <PubkeyCopy pubkey={pubkey} />
               <NpubQrCode pubkey={pubkey} />
             </div>
-            <Collapsible>
+            <Collapsible threshold={400} collapsedHeight={240} showLessButton>
               <ProfileAbout
                 about={about}
                 emojis={emojis}
-                className="mt-2 select-text whitespace-pre-wrap text-wrap break-words"
+                className="mt-2 text-wrap wrap-break-word whitespace-pre-wrap select-text"
               />
             </Collapsible>
             {website && (
-              <div className="mt-2 flex select-text items-center gap-1 truncate text-primary">
+              <div className="text-primary mt-2 flex items-center gap-1 truncate select-text">
                 <Link size={14} className="shrink-0" />
                 <a
                   href={website}
@@ -206,7 +204,7 @@ export default function Profile({ id }: { id?: string }) {
             </div>
           </div>
         </div>
-        <div className="px-4 pb-0.5 pt-3.5">
+        <div className="px-4 pt-3.5 pb-0.5">
           <SearchInput
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
@@ -214,8 +212,25 @@ export default function Profile({ id }: { id?: string }) {
           />
         </div>
       </div>
-      <ProfileFeed pubkey={pubkey} topSpace={topContainerHeight + 100} search={debouncedInput} />
+      <ProfileFeed pubkey={pubkey} search={debouncedInput} />
     </>
+  )
+}
+
+function LightningAddressCopy({ lightningAddress }: { lightningAddress: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const copy = () => {
+    copyText(lightningAddress)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div className="flex flex-1 cursor-pointer items-center gap-1" onClick={copy}>
+      <div className="w-0 max-w-fit flex-1 truncate">{lightningAddress}</div>
+      {copied ? <Check size={14} /> : <Copy size={14} />}
+    </div>
   )
 }
 
@@ -224,16 +239,13 @@ function SpCopy({ sp }: { sp: string }) {
   const truncated = sp.length > 24 ? sp.slice(0, 12) + '...' + sp.slice(-6) : sp
 
   const copy = () => {
-    navigator.clipboard.writeText(sp)
+    copyText(sp)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
   return (
-    <div
-      className="clickable flex w-fit items-center gap-1 font-mono text-xs"
-      onClick={copy}
-    >
+    <div className="flex w-fit cursor-pointer items-center gap-1" onClick={copy}>
       <div>{truncated}</div>
       {copied ? <Check size={14} /> : <Copy size={14} />}
     </div>

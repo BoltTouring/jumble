@@ -1,3 +1,4 @@
+import { useNativeNavigation } from './hooks/use-native-navigation'
 import Sidebar from '@/components/Sidebar'
 import { cn } from '@/lib/utils'
 import { CurrentRelaysProvider } from '@/providers/CurrentRelaysProvider'
@@ -15,6 +16,9 @@ import {
 } from 'react'
 import BackgroundAudio from './components/BackgroundAudio'
 import BottomNavigationBar from './components/BottomNavigationBar'
+import DraftBox from './components/DraftBox'
+import DraftEditorHost from './components/DraftBox/DraftEditorHost'
+import NewPost from './components/NewPost'
 import TooManyRelaysAlertDialog from './components/TooManyRelaysAlertDialog'
 import { normalizeUrl } from './lib/url'
 import { NotificationProvider } from './providers/NotificationProvider'
@@ -41,7 +45,8 @@ type TStackItem = {
   index: number
   url: string
   element: React.ReactElement | null
-  ref: RefObject<TPageRef> | null
+  ref: RefObject<TPageRef | null> | null
+  hideBottomBar: boolean
 }
 
 const PrimaryPageContext = createContext<TPrimaryPageContext | undefined>(undefined)
@@ -75,9 +80,12 @@ export function PageManager({ maxStackSize = 5 }: { maxStackSize?: number }) {
     }
   ])
   const [secondaryStack, setSecondaryStack] = useState<TStackItem[]>([])
-  const { isSmallScreen } = useScreenSize()
+  const bottomBarHidden =
+    secondaryStack.length > 0 && secondaryStack[secondaryStack.length - 1].hideBottomBar
+  const bottomBarOffset = bottomBarHidden ? '0px' : 'calc(env(safe-area-inset-bottom) + 3rem)'
+  const { isSmallScreen, isLargeScreen } = useScreenSize()
   const { themeSetting } = useTheme()
-  const { enableSingleColumnLayout } = useUserPreferences()
+  const { enableSingleColumnLayout, sidebarCollapse } = useUserPreferences()
   const ignorePopStateRef = useRef(false)
 
   useEffect(() => {
@@ -187,21 +195,23 @@ export function PageManager({ maxStackSize = 5 }: { maxStackSize?: number }) {
         const topItem = newStack[newStack.length - 1] as TStackItem | undefined
         if (!topItem) {
           // Create a new stack item if it's not exist (e.g. when the user refreshes the page, the stack will be empty)
-          const { element, ref } = findAndCloneElement(state.url, state.index)
+          const { element, ref, hideBottomBar } = findAndCloneElement(state.url, state.index)
           if (element) {
             newStack.push({
               index: state.index,
               url: state.url,
               element,
-              ref
+              ref,
+              hideBottomBar: hideBottomBar ?? false
             })
           }
         } else if (!topItem.element) {
           // Load the element if it's not cached
-          const { element, ref } = findAndCloneElement(topItem.url, state.index)
+          const { element, ref, hideBottomBar } = findAndCloneElement(topItem.url, state.index)
           if (element) {
             topItem.element = element
             topItem.ref = ref
+            topItem.hideBottomBar = hideBottomBar ?? false
           }
         }
         if (newStack.length === 0) {
@@ -219,6 +229,7 @@ export function PageManager({ maxStackSize = 5 }: { maxStackSize?: number }) {
   }, [])
 
   const navigatePrimaryPage = (page: TPrimaryPageName, props?: any) => {
+    if (!PRIMARY_PAGE_MAP[page]) return
     const needScrollToTop = page === currentPrimaryPage
     setPrimaryPages((prev) => {
       const exists = prev.find((p) => p.name === page)
@@ -272,124 +283,40 @@ export function PageManager({ maxStackSize = 5 }: { maxStackSize?: number }) {
     popSecondaryPage(-secondaryStack.length)
   }
 
-  if (isSmallScreen) {
-    return (
-      <PrimaryPageContext.Provider
-        value={{
-          navigate: navigatePrimaryPage,
-          current: currentPrimaryPage,
-          display: secondaryStack.length === 0
-        }}
-      >
-        <SecondaryPageContext.Provider
-          value={{
-            push: pushSecondaryPage,
-            pop: popSecondaryPage,
-            currentIndex: secondaryStack.length
-              ? secondaryStack[secondaryStack.length - 1].index
-              : 0
-          }}
-        >
-          <CurrentRelaysProvider>
-            <NotificationProvider>
-              {!!secondaryStack.length &&
-                secondaryStack.map((item, index) => (
-                  <div
-                    key={item.index}
-                    style={{
-                      display: index === secondaryStack.length - 1 ? 'block' : 'none'
-                    }}
-                  >
-                    {item.element}
-                  </div>
-                ))}
-              {primaryPages.map(({ name, element, props }) => (
-                <div
-                  key={name}
-                  style={{
-                    display:
-                      secondaryStack.length === 0 && currentPrimaryPage === name ? 'block' : 'none'
-                  }}
-                >
-                  {props ? cloneElement(element as React.ReactElement, props) : element}
-                </div>
-              ))}
-              <BottomNavigationBar />
-              <TooManyRelaysAlertDialog />
-            </NotificationProvider>
-          </CurrentRelaysProvider>
-        </SecondaryPageContext.Provider>
-      </PrimaryPageContext.Provider>
-    )
-  }
+  const isWideSecondaryArticleEditor =
+    !enableSingleColumnLayout &&
+    isLargeScreen &&
+    /^\/articles\/(?:new|[^/]+\/edit)(?:[?#]|$)/.test(secondaryStack.at(-1)?.url ?? '')
+  const primaryVisible = !enableSingleColumnLayout || secondaryStack.length === 0
+  const panelClassName = !enableSingleColumnLayout
+    ? cn(
+        'bg-background relative overflow-hidden',
+        themeSetting === 'pure-black' ? 'border-s' : 'rounded-2xl'
+      )
+    : undefined
 
-  if (enableSingleColumnLayout) {
-    return (
-      <PrimaryPageContext.Provider
-        value={{
-          navigate: navigatePrimaryPage,
-          current: currentPrimaryPage,
-          display: secondaryStack.length === 0
-        }}
-      >
-        <SecondaryPageContext.Provider
-          value={{
-            push: pushSecondaryPage,
-            pop: popSecondaryPage,
-            currentIndex: secondaryStack.length
-              ? secondaryStack[secondaryStack.length - 1].index
-              : 0
-          }}
-        >
-          <CurrentRelaysProvider>
-            <NotificationProvider>
-              <div className="flex w-full lg:justify-around">
-                <div className="sticky top-0 flex h-[var(--vh)] justify-end self-start lg:w-full">
-                  <Sidebar />
-                </div>
-                <div className="w-0 flex-1 border-x bg-background lg:w-[640px] lg:flex-auto lg:shrink-0">
-                  {!!secondaryStack.length &&
-                    secondaryStack.map((item, index) => (
-                      <div
-                        key={item.index}
-                        style={{
-                          display: index === secondaryStack.length - 1 ? 'block' : 'none'
-                        }}
-                      >
-                        {item.element}
-                      </div>
-                    ))}
-                  {primaryPages.map(({ name, element, props }) => (
-                    <div
-                      key={name}
-                      style={{
-                        display:
-                          secondaryStack.length === 0 && currentPrimaryPage === name
-                            ? 'block'
-                            : 'none'
-                      }}
-                    >
-                      {props ? cloneElement(element as React.ReactElement, props) : element}
-                    </div>
-                  ))}
-                </div>
-                <div className="hidden lg:block lg:w-full" />
-              </div>
-              <TooManyRelaysAlertDialog />
-              <BackgroundAudio className="fixed bottom-20 right-0 z-50 w-80 overflow-hidden rounded-l-full rounded-r-none border shadow-lg" />
-            </NotificationProvider>
-          </CurrentRelaysProvider>
-        </SecondaryPageContext.Provider>
-      </PrimaryPageContext.Provider>
-    )
-  }
+  // Keep providers, panels and page wrappers in the same tree positions in every mode.
+  // Reparenting a cached React element still remounts it and loses its local state.
+  useNativeNavigation(secondaryStack.length > 0, (path) => {
+    const url = new URL(path, window.location.origin)
+    if (url.pathname !== '/') {
+      pushSecondaryPage(path)
+      return
+    }
+    const relay = url.searchParams.get('r')
+    if (relay && normalizeUrl(relay)) navigatePrimaryPage('relay', { url: normalizeUrl(relay) })
+    else {
+      const page = url.searchParams.get('page')
+      navigatePrimaryPage(page && page in PRIMARY_PAGE_MAP ? (page as TPrimaryPageName) : 'home')
+    }
+  })
 
   return (
     <PrimaryPageContext.Provider
       value={{
         navigate: navigatePrimaryPage,
         current: currentPrimaryPage,
-        display: true
+        display: primaryVisible && !isWideSecondaryArticleEditor
       }}
     >
       <SecondaryPageContext.Provider
@@ -401,50 +328,93 @@ export function PageManager({ maxStackSize = 5 }: { maxStackSize?: number }) {
       >
         <CurrentRelaysProvider>
           <NotificationProvider>
-            <div className="flex flex-col items-center bg-surface-background">
+            <div
+              className={cn(
+                !enableSingleColumnLayout && 'bg-surface-background flex flex-col items-center',
+                isSmallScreen && 'safe-area-x'
+              )}
+              style={
+                {
+                  '--bottom-bar-offset': isSmallScreen ? bottomBarOffset : '0px'
+                } as React.CSSProperties
+              }
+            >
               <div
-                className="flex h-[var(--vh)] w-full bg-surface-background"
-                style={{
-                  maxWidth: '1920px'
-                }}
+                className={cn(
+                  'w-full',
+                  !enableSingleColumnLayout && 'bg-surface-background flex h-(--vh) max-w-[1920px]',
+                  enableSingleColumnLayout && !isSmallScreen && 'wide:justify-around flex'
+                )}
               >
-                <Sidebar />
                 <div
                   className={cn(
-                    'grid w-full grid-cols-2',
-                    themeSetting === 'pure-black' ? '' : 'gap-2 py-2 pr-2'
+                    'shrink-0',
+                    enableSingleColumnLayout &&
+                      cn(
+                        // Fixed widths use the viewport, so account for the scrollbar
+                        // Radix removes (and the physical right margin it adds in RTL).
+                        'wide:w-[calc((100%-var(--removed-body-scroll-bar-size,0px)-640px)/2)] pointer-events-none fixed start-0 top-0 z-10 flex h-(--vh) justify-end rtl:start-[var(--removed-body-scroll-bar-size,0px)]',
+                        sidebarCollapse ? 'w-16' : 'w-52'
+                      ),
+                    isSmallScreen && 'hidden'
+                  )}
+                >
+                  <div className="pointer-events-auto h-full">
+                    <Sidebar />
+                  </div>
+                </div>
+                <div
+                  className={cn(
+                    enableSingleColumnLayout && !isSmallScreen ? 'wide:w-full' : 'hidden',
+                    sidebarCollapse ? 'w-16' : 'w-52'
+                  )}
+                />
+                <div
+                  className={cn(
+                    !enableSingleColumnLayout && 'grid w-full min-w-0 grid-cols-2',
+                    !enableSingleColumnLayout && themeSetting !== 'pure-black' && 'gap-2 py-2 pe-2',
+                    enableSingleColumnLayout &&
+                      !isSmallScreen &&
+                      'bg-background wide:w-[640px] wide:flex-auto wide:shrink-0 min-h-screen w-0 flex-1 border-x'
                   )}
                 >
                   <div
+                    id="primary-page-panel"
                     className={cn(
-                      'overflow-hidden bg-background',
-                      themeSetting === 'pure-black' ? 'border-l' : 'rounded-2xl shadow-lg'
+                      panelClassName,
+                      !enableSingleColumnLayout && themeSetting !== 'pure-black' && 'shadow-lg'
                     )}
+                    style={{ display: primaryVisible ? undefined : 'none' }}
                   >
                     {primaryPages.map(({ name, element, props }) => (
                       <div
                         key={name}
-                        className="flex h-full w-full flex-col"
-                        style={{
-                          display: currentPrimaryPage === name ? 'block' : 'none'
-                        }}
+                        className={cn(!enableSingleColumnLayout && 'h-full w-full')}
+                        style={{ display: currentPrimaryPage === name ? 'block' : 'none' }}
                       >
                         {props ? cloneElement(element as React.ReactElement, props) : element}
                       </div>
                     ))}
                   </div>
                   <div
+                    id="secondary-page-panel"
                     className={cn(
-                      'overflow-hidden bg-background',
-                      themeSetting === 'pure-black' ? 'border-l' : 'rounded-2xl',
-                      themeSetting !== 'pure-black' && secondaryStack.length > 0 && 'shadow-lg',
-                      secondaryStack.length === 0 ? 'bg-surface' : ''
+                      panelClassName,
+                      !enableSingleColumnLayout && secondaryStack.length === 0 && 'bg-surface',
+                      !enableSingleColumnLayout &&
+                        themeSetting !== 'pure-black' &&
+                        secondaryStack.length > 0 &&
+                        'shadow-lg'
                     )}
+                    style={{
+                      display:
+                        enableSingleColumnLayout && !secondaryStack.length ? 'none' : undefined
+                    }}
                   >
                     {secondaryStack.map((item, index) => (
                       <div
                         key={item.index}
-                        className="flex h-full w-full flex-col"
+                        className={cn(!enableSingleColumnLayout && 'h-full w-full')}
                         style={{ display: index === secondaryStack.length - 1 ? 'block' : 'none' }}
                       >
                         {item.element}
@@ -452,10 +422,29 @@ export function PageManager({ maxStackSize = 5 }: { maxStackSize?: number }) {
                     ))}
                   </div>
                 </div>
+                <div
+                  className={cn(
+                    enableSingleColumnLayout && !isSmallScreen
+                      ? 'wide:block wide:w-full hidden'
+                      : 'hidden'
+                  )}
+                />
               </div>
+              {isSmallScreen && !bottomBarHidden && <BottomNavigationBar />}
             </div>
             <TooManyRelaysAlertDialog />
-            <BackgroundAudio className="fixed bottom-20 right-0 z-50 w-80 overflow-hidden rounded-l-full rounded-r-none border shadow-lg" />
+            <BackgroundAudio
+              className={cn(
+                'fixed end-0 z-50 overflow-hidden',
+                isSmallScreen
+                  ? 'safe-area-x bg-background bottom-[calc(env(safe-area-inset-bottom)+3rem)] w-full max-w-none rounded-none border-x-0 border-y [--safe-area-padding:0.5rem]'
+                  : 'bottom-20 w-80 rounded-s-full rounded-e-none border shadow-lg',
+                isSmallScreen && bottomBarHidden && 'hidden'
+              )}
+            />
+            <DraftBox />
+            <DraftEditorHost />
+            <NewPost />
           </NotificationProvider>
         </CurrentRelaysProvider>
       </SecondaryPageContext.Provider>
@@ -500,13 +489,17 @@ function isCurrentPage(stack: TStackItem[], url: string) {
 
 function findAndCloneElement(url: string, index: number) {
   const path = url.split('?')[0].split('#')[0]
-  for (const { matcher, element } of SECONDARY_ROUTES) {
+  for (const { matcher, element, hideBottomBar } of SECONDARY_ROUTES) {
     const match = matcher(path)
     if (!match) continue
 
     if (!element) return {}
     const ref = createRef<TPageRef>()
-    return { element: cloneElement(element, { ...match.params, index, ref } as any), ref }
+    return {
+      element: cloneElement(element, { ...match.params, index, ref } as any),
+      ref,
+      hideBottomBar
+    }
   }
   return {}
 }
@@ -520,10 +513,16 @@ function pushNewPageToStack(
   const currentItem = stack[stack.length - 1]
   const currentIndex = specificIndex ?? (currentItem ? currentItem.index + 1 : 0)
 
-  const { element, ref } = findAndCloneElement(url, currentIndex)
+  const { element, ref, hideBottomBar } = findAndCloneElement(url, currentIndex)
   if (!element) return { newStack: stack, newItem: null }
 
-  const newItem = { element, ref, url, index: currentIndex }
+  const newItem: TStackItem = {
+    element,
+    ref,
+    url,
+    index: currentIndex,
+    hideBottomBar: hideBottomBar ?? false
+  }
   const newStack = [...stack, newItem]
   const lastCachedIndex = newStack.findIndex((stack) => stack.element)
   // Clear the oldest cached element if there are too many cached elements

@@ -1,5 +1,5 @@
+import { copyText } from '@/lib/native-system'
 import { Button } from '@/components/ui/button'
-import { Drawer, DrawerContent, DrawerTrigger } from '@/components/ui/drawer'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import { Modal, ModalContent, ModalTrigger } from '@/components/ui/modal'
 import { useFavoriteRelays } from '@/providers/FavoriteRelaysProvider'
 import { useScreenSize } from '@/providers/ScreenSizeProvider'
 import { TRelaySet } from '@/types'
@@ -47,11 +48,11 @@ export default function RelaySet({ relaySet }: { relaySet: TRelaySet }) {
         <div className="flex items-center justify-between">
           <div className="flex items-center">
             <div
-              className="cursor-grab touch-none rounded p-2 hover:bg-muted active:cursor-grabbing"
+              className="hover:bg-muted cursor-grab touch-none rounded p-2 active:cursor-grabbing"
               {...attributes}
               {...listeners}
             >
-              <GripVertical className="size-4 text-muted-foreground" />
+              <GripVertical className="text-muted-foreground size-4" />
             </div>
             <div className="flex items-center gap-2">
               <div className="flex h-6 w-6 shrink-0 items-center justify-center">
@@ -111,7 +112,7 @@ function RelaySetName({ relaySet }: { relaySet: TRelaySet }) {
       </Button>
     </div>
   ) : (
-    <div className="flex h-8 select-none items-center font-semibold">{relaySet.name}</div>
+    <div className="flex h-8 items-center font-semibold select-none">{relaySet.name}</div>
   )
 }
 
@@ -125,7 +126,7 @@ function RelayUrlsExpandToggle({
   const { expandedRelaySetId, setExpandedRelaySetId } = useRelaySetsSettingComponent()
   return (
     <div
-      className="flex cursor-pointer items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+      className="text-muted-foreground hover:text-foreground flex cursor-pointer items-center gap-1 text-sm"
       onClick={() => setExpandedRelaySetId((pre) => (pre === relaySetId ? null : relaySetId))}
     >
       <div className="select-none">{children}</div>
@@ -154,16 +155,14 @@ function RelaySetOptions({ relaySet }: { relaySet: TRelaySet }) {
   }
 
   const copyShareLink = () => {
-    navigator.clipboard.writeText(
-      `https://jumble.social/?${relaySet.relayUrls.map((url) => 'r=' + url).join('&')}`
-    )
+    copyText(`https://jumble.social/?${relaySet.relayUrls.map((url) => 'r=' + url).join('&')}`)
   }
 
   if (isSmallScreen) {
     return (
-      <Drawer>
-        <DrawerTrigger asChild>{trigger}</DrawerTrigger>
-        <DrawerContent>
+      <Modal>
+        <ModalTrigger asChild>{trigger}</ModalTrigger>
+        <ModalContent>
           <div className="py-2">
             <DrawerMenuItem onClick={rename}>
               <Edit />
@@ -181,8 +180,8 @@ function RelaySetOptions({ relaySet }: { relaySet: TRelaySet }) {
               {t('Delete')}
             </DrawerMenuItem>
           </div>
-        </DrawerContent>
-      </Drawer>
+        </ModalContent>
+      </Modal>
     )
   }
 

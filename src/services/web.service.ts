@@ -1,3 +1,6 @@
+import { LINK_PREVIEW_SERVER } from '@/constants'
+import { BoundedMap } from '@/lib/bounded-map'
+import { proxyFetch } from '@/lib/proxy-fetch'
 import { TWebMetadata } from '@/types'
 import DataLoader from 'dataloader'
 
@@ -5,32 +8,13 @@ class WebService {
   static instance: WebService
 
   private webMetadataDataLoader = new DataLoader<string, TWebMetadata>(
-    async (urls) => {
-      return await Promise.all(
-        urls.map(async (url) => {
-          try {
-            const res = await fetch(url)
-            const html = await res.text()
-            const parser = new DOMParser()
-            const doc = parser.parseFromString(html, 'text/html')
-
-            const title =
-              doc.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
-              doc.querySelector('title')?.textContent
-            const description =
-              doc.querySelector('meta[property="og:description"]')?.getAttribute('content') ||
-              (doc.querySelector('meta[name="description"]') as HTMLMetaElement | null)?.content
-            const image = (doc.querySelector('meta[property="og:image"]') as HTMLMetaElement | null)
-              ?.content
-
-            return { title, description, image }
-          } catch {
-            return {}
-          }
-        })
-      )
+    async (keys) => {
+      return await Promise.all(keys.map((url) => this.fetchOne(url)))
     },
-    { maxBatchSize: 1 }
+    {
+      maxBatchSize: 1,
+      cacheMap: new BoundedMap<string, Promise<TWebMetadata>>({ maxSize: 1_000 })
+    }
   )
 
   constructor() {
@@ -42,6 +26,25 @@ class WebService {
 
   async fetchWebMetadata(url: string) {
     return await this.webMetadataDataLoader.load(url)
+  }
+
+  private async fetchOne(url: string): Promise<TWebMetadata> {
+    try {
+      const res = await proxyFetch(`${LINK_PREVIEW_SERVER}/?url=${encodeURIComponent(url)}`, {
+        headers: { accept: 'application/json' }
+      })
+      if (!res.ok) return {}
+
+      const data = JSON.parse(res.body) as Partial<Record<string, string | null>>
+
+      return {
+        title: data.title,
+        description: data.description,
+        image: data.image
+      }
+    } catch {
+      return {}
+    }
   }
 }
 

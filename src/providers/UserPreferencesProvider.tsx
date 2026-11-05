@@ -1,5 +1,6 @@
+import client from '@/services/client.service'
 import storage from '@/services/local-storage.service'
-import { TEmoji, TNotificationStyle } from '@/types'
+import { TEmoji, TFeedTabConfig, TNotificationStyle, TNotificationTabConfig } from '@/types'
 import { createContext, useContext, useEffect, useState } from 'react'
 import { useScreenSize } from './ScreenSizeProvider'
 
@@ -10,17 +11,35 @@ type TUserPreferencesContext = {
   muteMedia: boolean
   updateMuteMedia: (mute: boolean) => void
 
+  showLinkPreviews: boolean
+  updateShowLinkPreviews: (show: boolean) => void
+
   sidebarCollapse: boolean
   updateSidebarCollapse: (collapse: boolean) => void
 
   enableSingleColumnLayout: boolean
   updateEnableSingleColumnLayout: (enable: boolean) => void
 
+  enableDm: boolean
+  updateEnableDm: (enable: boolean) => void
+
+  useNip22Replies: boolean
+  updateUseNip22Replies: (use: boolean) => void
+
   quickReaction: boolean
   updateQuickReaction: (enable: boolean) => void
 
   quickReactionEmoji: string | TEmoji
   updateQuickReactionEmoji: (emoji: string | TEmoji) => void
+
+  allowInsecureConnection: boolean
+  updateAllowInsecureConnection: (allow: boolean) => void
+
+  feedTabs: TFeedTabConfig[]
+  updateFeedTabs: (tabs: TFeedTabConfig[]) => void
+
+  notificationTabs: TNotificationTabConfig[]
+  updateNotificationTabs: (tabs: TNotificationTabConfig[]) => void
 }
 
 const UserPreferencesContext = createContext<TUserPreferencesContext | undefined>(undefined)
@@ -39,12 +58,23 @@ export function UserPreferencesProvider({ children }: { children: React.ReactNod
     storage.getNotificationListStyle()
   )
   const [muteMedia, setMuteMedia] = useState(true)
+  const [showLinkPreviews, setShowLinkPreviews] = useState(storage.getShowLinkPreviews())
   const [sidebarCollapse, setSidebarCollapse] = useState(storage.getSidebarCollapse())
   const [enableSingleColumnLayout, setEnableSingleColumnLayout] = useState(
     storage.getEnableSingleColumnLayout()
   )
+  const [enableDm, setEnableDm] = useState(storage.getEnableDm())
+  const [useNip22Replies, setUseNip22Replies] = useState(storage.getUseNip22Replies())
   const [quickReaction, setQuickReaction] = useState(storage.getQuickReaction())
   const [quickReactionEmoji, setQuickReactionEmoji] = useState(storage.getQuickReactionEmoji())
+
+  const [allowInsecureConnection, setAllowInsecureConnection] = useState(
+    storage.getAllowInsecureConnection()
+  )
+  const [feedTabs, setFeedTabs] = useState<TFeedTabConfig[]>(storage.getFeedTabs())
+  const [notificationTabs, setNotificationTabs] = useState<TNotificationTabConfig[]>(
+    storage.getNotificationTabs()
+  )
 
   useEffect(() => {
     if (!isSmallScreen && enableSingleColumnLayout) {
@@ -64,9 +94,24 @@ export function UserPreferencesProvider({ children }: { children: React.ReactNod
     storage.setSidebarCollapse(collapse)
   }
 
+  const updateShowLinkPreviews = (show: boolean) => {
+    setShowLinkPreviews(show)
+    storage.setShowLinkPreviews(show)
+  }
+
   const updateEnableSingleColumnLayout = (enable: boolean) => {
     setEnableSingleColumnLayout(enable)
     storage.setEnableSingleColumnLayout(enable)
+  }
+
+  const updateEnableDm = (enable: boolean) => {
+    storage.setEnableDm(enable)
+    setEnableDm(storage.getEnableDm())
+  }
+
+  const updateUseNip22Replies = (use: boolean) => {
+    setUseNip22Replies(use)
+    storage.setUseNip22Replies(use)
   }
 
   const updateQuickReaction = (enable: boolean) => {
@@ -79,6 +124,22 @@ export function UserPreferencesProvider({ children }: { children: React.ReactNod
     storage.setQuickReactionEmoji(emoji)
   }
 
+  const updateAllowInsecureConnection = (allow: boolean) => {
+    setAllowInsecureConnection(allow)
+    storage.setAllowInsecureConnection(allow)
+    client.setAllowInsecure(allow)
+  }
+
+  const updateFeedTabs = (tabs: TFeedTabConfig[]) => {
+    setFeedTabs(tabs)
+    storage.setFeedTabs(tabs)
+  }
+
+  const updateNotificationTabs = (tabs: TNotificationTabConfig[]) => {
+    setNotificationTabs(tabs)
+    storage.setNotificationTabs(tabs)
+  }
+
   return (
     <UserPreferencesContext.Provider
       value={{
@@ -86,14 +147,26 @@ export function UserPreferencesProvider({ children }: { children: React.ReactNod
         updateNotificationListStyle,
         muteMedia,
         updateMuteMedia: setMuteMedia,
+        showLinkPreviews,
+        updateShowLinkPreviews,
         sidebarCollapse,
         updateSidebarCollapse,
         enableSingleColumnLayout: isSmallScreen ? true : enableSingleColumnLayout,
         updateEnableSingleColumnLayout,
+        enableDm,
+        updateEnableDm,
+        useNip22Replies,
+        updateUseNip22Replies,
         quickReaction,
         updateQuickReaction,
         quickReactionEmoji,
-        updateQuickReactionEmoji
+        updateQuickReactionEmoji,
+        allowInsecureConnection,
+        updateAllowInsecureConnection,
+        feedTabs,
+        updateFeedTabs,
+        notificationTabs,
+        updateNotificationTabs
       }}
     >
       {children}

@@ -1,11 +1,12 @@
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useContentPolicy } from '@/providers/ContentPolicyProvider'
 import { useFetchProfile } from '@/hooks'
+import { canHover } from '@/lib/device'
 import { toProfile } from '@/lib/link'
 import { generateImageByPubkey } from '@/lib/pubkey'
-import { cn, isTouchDevice } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { SecondaryPageLink } from '@/PageManager'
+import { useContentPolicy } from '@/providers/ContentPolicyProvider'
 import { useMemo } from 'react'
 import Image from '../Image'
 import ProfileCard from '../ProfileCard'
@@ -30,7 +31,12 @@ export default function UserAvatar({
   className?: string
   size?: 'large' | 'big' | 'semiBig' | 'normal' | 'medium' | 'small' | 'xSmall' | 'tiny'
 }) {
-  const supportTouch = useMemo(() => isTouchDevice(), [])
+  const supportsHover = useMemo(() => canHover(), [])
+  const { autoLoadProfilePicture } = useContentPolicy()
+
+  if (!autoLoadProfilePicture) {
+    return null
+  }
 
   const trigger = (
     <SecondaryPageLink to={toProfile(userId)} onClick={(e) => e.stopPropagation()}>
@@ -38,7 +44,7 @@ export default function UserAvatar({
     </SecondaryPageLink>
   )
 
-  if (supportTouch) {
+  if (!supportsHover) {
     return trigger
   }
 
@@ -56,12 +62,14 @@ export function SimpleUserAvatar({
   userId,
   size = 'normal',
   className,
-  onClick
+  onClick,
+  ignorePolicy
 }: {
   userId: string
   size?: 'large' | 'big' | 'semiBig' | 'normal' | 'medium' | 'small' | 'xSmall' | 'tiny'
   className?: string
   onClick?: (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => void
+  ignorePolicy?: boolean
 }) {
   const { profile } = useFetchProfile(userId)
   const { autoLoadProfilePicture } = useContentPolicy()
@@ -70,6 +78,10 @@ export function SimpleUserAvatar({
     [profile]
   )
 
+  if (!ignorePolicy && !autoLoadProfilePicture) {
+    return null
+  }
+
   if (!profile) {
     return (
       <Skeleton className={cn('shrink-0', UserAvatarSizeCnMap[size], 'rounded-full', className)} />
@@ -77,7 +89,7 @@ export function SimpleUserAvatar({
   }
   const { avatar, pubkey } = profile || {}
 
-  const imageUrl = autoLoadProfilePicture ? (avatar ?? defaultAvatar) : defaultAvatar
+  const imageUrl = avatar ?? defaultAvatar
 
   return (
     <Image
@@ -90,4 +102,10 @@ export function SimpleUserAvatar({
       onClick={onClick}
     />
   )
+}
+
+export function UserAvatarSkeleton({ className }: { className?: string }) {
+  const { autoLoadProfilePicture } = useContentPolicy()
+  if (!autoLoadProfilePicture) return null
+  return <Skeleton className={cn('shrink-0 rounded-full', className)} />
 }

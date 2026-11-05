@@ -1,3 +1,4 @@
+import { getEventAuthorPubkey } from '@/lib/event'
 import { useNostr } from '@/providers/NostrProvider'
 import { useNotificationUserPreference } from '@/providers/NotificationUserPreferenceProvider'
 import client from '@/services/client.service'
@@ -9,10 +10,12 @@ import Notification from './Notification'
 
 export function RepostNotification({
   notification,
-  isNew = false
+  isNew = false,
+  onVisibilityChange
 }: {
   notification: Event
   isNew?: boolean
+  onVisibilityChange?: (isVisible: boolean) => void
 }) {
   const { t } = useTranslation()
   const { pubkey } = useNostr()
@@ -29,7 +32,7 @@ export function RepostNotification({
     }
   }, [notification.content])
   if (!event) return null
-  if (hideIndirect && event.pubkey !== pubkey) {
+  if (hideIndirect && getEventAuthorPubkey(event) !== pubkey) {
     return null
   }
 
@@ -42,6 +45,7 @@ export function RepostNotification({
       targetEvent={event}
       description={t('reposted your note')}
       isNew={isNew}
+      onVisibilityChange={onVisibilityChange}
     />
   )
 }

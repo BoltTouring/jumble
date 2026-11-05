@@ -1,23 +1,34 @@
+import { copyText } from '@/lib/native-system'
 import { Button } from '@/components/ui/button'
-import { Highlighter } from 'lucide-react'
+import { Copy, Highlighter } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 interface HighlightButtonProps {
   onHighlight: (selectedText: string) => void
-  containerRef?: React.RefObject<HTMLElement>
+  containerRef?: React.RefObject<HTMLElement | null>
 }
 
 export default function HighlightButton({ onHighlight, containerRef }: HighlightButtonProps) {
   const { t } = useTranslation()
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null)
   const [selectedText, setSelectedText] = useState('')
-  const buttonRef = useRef<HTMLButtonElement>(null)
+  const actionsRef = useRef<HTMLDivElement>(null)
+
+  const clearSelection = () => {
+    window.getSelection()?.removeAllRanges()
+    setPosition(null)
+    setSelectedText('')
+  }
 
   useEffect(() => {
+    let selectionTimeout: ReturnType<typeof setTimeout> | undefined
     const handleSelectionEnd = () => {
       // Use a small delay to ensure selection is complete
-      setTimeout(() => {
+      clearTimeout(selectionTimeout)
+      selectionTimeout = setTimeout(() => {
         const selection = window.getSelection()
         const text = selection?.toString().trim()
 
@@ -42,31 +53,40 @@ export default function HighlightButton({ onHighlight, containerRef }: Highlight
 
         // Get the bounding rect of the entire selection
         const rect = range.getBoundingClientRect()
-        const scrollTop = window.pageYOffset || document.documentElement.scrollTop
-        const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft
 
-        // Position button above the selection area, centered horizontally
+        // The portaled fixed toolbar uses viewport coordinates, just like the range rect.
         setPosition({
-          top: rect.top + scrollTop - 48, // 48px above the selection
-          left: rect.left + scrollLeft + rect.width / 2 // Center of the selection
+          top: rect.top - 48, // 48px above the selection
+          left: rect.left + rect.width / 2 // Center of the selection
         })
         setSelectedText(text)
       }, 10)
     }
 
-    // Only listen to mouseup and touchend (when user finishes selection)
+    const hideActions = () => {
+      clearTimeout(selectionTimeout)
+      setPosition(null)
+      setSelectedText('')
+    }
+
+    // Show actions when selection finishes; dismiss them when the viewport changes.
     document.addEventListener('mouseup', handleSelectionEnd)
     document.addEventListener('touchend', handleSelectionEnd)
+    document.addEventListener('scroll', hideActions, true)
+    window.addEventListener('resize', hideActions)
 
     return () => {
+      clearTimeout(selectionTimeout)
       document.removeEventListener('mouseup', handleSelectionEnd)
       document.removeEventListener('touchend', handleSelectionEnd)
+      document.removeEventListener('scroll', hideActions, true)
+      window.removeEventListener('resize', hideActions)
     }
   }, [containerRef])
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (buttonRef.current && !buttonRef.current.contains(event.target as Node)) {
+      if (actionsRef.current && !actionsRef.current.contains(event.target as Node)) {
         const selection = window.getSelection()
         if (!selection?.toString().trim()) {
           setPosition(null)
@@ -85,31 +105,47 @@ export default function HighlightButton({ onHighlight, containerRef }: Highlight
     return null
   }
 
-  return (
+  return createPortal(
     <div
-      className="fixed z-50 duration-200 animate-in fade-in-0 slide-in-from-bottom-4"
+      ref={actionsRef}
+      className="bg-primary animate-in fade-in-0 slide-in-from-bottom-4 fixed z-50 flex -translate-x-1/2 overflow-hidden rounded-md shadow-lg duration-200"
       style={{
         top: `${position.top}px`,
         left: `${position.left}px`
       }}
     >
       <Button
-        ref={buttonRef}
         size="sm"
         variant="default"
-        className="-translate-x-1/2 gap-2 shadow-lg"
+        className="rounded-none shadow-none"
         onClick={(e) => {
           e.stopPropagation()
           onHighlight(selectedText)
-          // Clear selection after highlighting
-          window.getSelection()?.removeAllRanges()
-          setPosition(null)
-          setSelectedText('')
+          clearSelection()
         }}
       >
         <Highlighter className="h-4 w-4" />
         {t('Highlight')}
       </Button>
-    </div>
+      <Button
+        size="sm"
+        variant="default"
+        className="border-primary-foreground/20 rounded-none border-s shadow-none"
+        onClick={async (e) => {
+          e.stopPropagation()
+          try {
+            await copyText(selectedText)
+            toast.success(t('Copied to Clipboard'))
+            clearSelection()
+          } catch (error) {
+            console.error('Failed to copy selected text:', error)
+          }
+        }}
+      >
+        <Copy className="h-4 w-4" />
+        {t('Copy')}
+      </Button>
+    </div>,
+    document.body
   )
 }

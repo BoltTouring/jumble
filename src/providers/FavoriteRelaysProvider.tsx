@@ -143,6 +143,20 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
     )
   }, [relaySetEvents])
 
+  // Tell the client which relays the user explicitly owns/configured. Their
+  // insecure (ws://) subset becomes the pool's trusted-insecure allowlist, so
+  // the user can still browse their own local relays while insecure relays from
+  // other people's data stay blocked.
+  useEffect(() => {
+    client.setOwnRelayUrls([
+      ...getDefaultRelayUrls(),
+      ...(relayList?.read ?? []),
+      ...(relayList?.write ?? []),
+      ...favoriteRelays,
+      ...relaySets.flatMap((set) => set.relayUrls)
+    ])
+  }, [relayList, favoriteRelays, relaySets])
+
   const addFavoriteRelays = async (relayUrls: string[]) => {
     const normalizedUrls = relayUrls
       .map((relayUrl) => normalizeUrl(relayUrl))
@@ -151,7 +165,8 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
 
     const draftEvent = createFavoriteRelaysDraftEvent(
       [...favoriteRelays, ...normalizedUrls],
-      relaySetEvents
+      relaySetEvents,
+      favoriteRelaysEvent?.content ?? ''
     )
     try {
       const newFavoriteRelaysEvent = await publish(draftEvent)
@@ -172,7 +187,8 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
 
     const draftEvent = createFavoriteRelaysDraftEvent(
       favoriteRelays.filter((url) => !normalizedUrls.includes(url)),
-      relaySetEvents
+      relaySetEvents,
+      favoriteRelaysEvent?.content ?? ''
     )
     try {
       const newFavoriteRelaysEvent = await publish(draftEvent)
@@ -199,10 +215,11 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
       const newRelaySetEvent = await publish(relaySetDraftEvent)
       await indexedDb.putReplaceableEvent(newRelaySetEvent)
 
-      const favoriteRelaysDraftEvent = createFavoriteRelaysDraftEvent(favoriteRelays, [
-        ...relaySetEvents,
-        newRelaySetEvent
-      ])
+      const favoriteRelaysDraftEvent = createFavoriteRelaysDraftEvent(
+        favoriteRelays,
+        [...relaySetEvents, newRelaySetEvent],
+        favoriteRelaysEvent?.content ?? ''
+      )
       const newFavoriteRelaysEvent = await publish(favoriteRelaysDraftEvent)
       updateFavoriteRelaysEvent(newFavoriteRelaysEvent)
     } catch (error) {
@@ -214,10 +231,11 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
   }
 
   const addRelaySets = async (newRelaySetEvents: Event[]) => {
-    const favoriteRelaysDraftEvent = createFavoriteRelaysDraftEvent(favoriteRelays, [
-      ...relaySetEvents,
-      ...newRelaySetEvents
-    ])
+    const favoriteRelaysDraftEvent = createFavoriteRelaysDraftEvent(
+      favoriteRelays,
+      [...relaySetEvents, ...newRelaySetEvents],
+      favoriteRelaysEvent?.content ?? ''
+    )
     try {
       const newFavoriteRelaysEvent = await publish(favoriteRelaysDraftEvent)
       updateFavoriteRelaysEvent(newFavoriteRelaysEvent)
@@ -235,7 +253,11 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
     })
     if (newRelaySetEvents.length === relaySetEvents.length) return
 
-    const draftEvent = createFavoriteRelaysDraftEvent(favoriteRelays, newRelaySetEvents)
+    const draftEvent = createFavoriteRelaysDraftEvent(
+      favoriteRelays,
+      newRelaySetEvents,
+      favoriteRelaysEvent?.content ?? ''
+    )
     try {
       const newFavoriteRelaysEvent = await publish(draftEvent)
       updateFavoriteRelaysEvent(newFavoriteRelaysEvent)
@@ -248,7 +270,10 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
   }
 
   const updateRelaySet = async (newSet: TRelaySet) => {
-    const draftEvent = createRelaySetDraftEvent(newSet)
+    const oldRelaySetEvent = relaySetEvents.find(
+      (event) => getReplaceableEventIdentifier(event) === newSet.id
+    )
+    const draftEvent = createRelaySetDraftEvent(newSet, oldRelaySetEvent?.content ?? '')
 
     try {
       const newRelaySetEvent = await publish(draftEvent)
@@ -272,7 +297,11 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
 
   const reorderFavoriteRelays = async (reorderedRelays: string[]) => {
     setFavoriteRelays(reorderedRelays)
-    const draftEvent = createFavoriteRelaysDraftEvent(reorderedRelays, relaySetEvents)
+    const draftEvent = createFavoriteRelaysDraftEvent(
+      reorderedRelays,
+      relaySetEvents,
+      favoriteRelaysEvent?.content ?? ''
+    )
     try {
       const newFavoriteRelaysEvent = await publish(draftEvent)
       updateFavoriteRelaysEvent(newFavoriteRelaysEvent)
@@ -288,7 +317,8 @@ export function FavoriteRelaysProvider({ children }: { children: React.ReactNode
     setRelaySets(reorderedSets)
     const draftEvent = createFavoriteRelaysDraftEvent(
       favoriteRelays,
-      reorderedSets.map((set) => set.aTag)
+      reorderedSets.map((set) => set.aTag),
+      favoriteRelaysEvent?.content ?? ''
     )
     try {
       const newFavoriteRelaysEvent = await publish(draftEvent)

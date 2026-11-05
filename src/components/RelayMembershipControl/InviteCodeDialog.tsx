@@ -1,3 +1,4 @@
+import { copyText } from '@/lib/native-system'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -6,16 +7,8 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import {
-  Drawer,
-  DrawerContent,
-  DrawerDescription,
-  DrawerHeader,
-  DrawerTitle
-} from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useScreenSize } from '@/providers/ScreenSizeProvider'
 import relayMembershipService from '@/services/relay-membership.service'
 import { TRelayInfo } from '@/types'
 import { Check, Copy } from 'lucide-react'
@@ -33,7 +26,7 @@ export default function InviteCodeDialog({
   setShowInviteCodeDialog: (open: boolean) => void
 }) {
   const { t } = useTranslation()
-  const { isSmallScreen } = useScreenSize()
+
   const [isFetching, setIsFetching] = useState(false)
   const [inviteCode, setInviteCode] = useState('')
   const [copied, setCopied] = useState(false)
@@ -47,11 +40,9 @@ export default function InviteCodeDialog({
     const getInviteCode = async () => {
       setIsFetching(true)
       try {
-        if (relayInfo.pubkey) {
-          const code = await relayMembershipService.requestInviteCode(
-            relayInfo.url,
-            relayInfo.pubkey
-          )
+        const relayPubkey = relayInfo.self || relayInfo.pubkey
+        if (relayPubkey) {
+          const code = await relayMembershipService.requestInviteCode(relayInfo.url, relayPubkey)
           if (code) {
             setInviteCode(code)
           } else {
@@ -70,7 +61,7 @@ export default function InviteCodeDialog({
   const handleCopyInviteCode = () => {
     if (!inviteCode) return
 
-    navigator.clipboard.writeText(inviteCode)
+    copyText(inviteCode)
     toast.success(t('Invite code copied to clipboard'))
     setCopied(true)
 
@@ -92,31 +83,15 @@ export default function InviteCodeDialog({
           {copied ? <Check /> : <Copy />}
         </Button>
       </div>
-      <p className="text-sm text-muted-foreground">
+      <p className="text-muted-foreground text-sm">
         {t('This invite code can be used by others to join the relay.')}
       </p>
     </div>
   ) : (
-    <div className="py-8 text-center text-muted-foreground">
+    <div className="text-muted-foreground py-8 text-center">
       {t('No invite code available from this relay.')}
     </div>
   )
-
-  if (isSmallScreen) {
-    return (
-      <Drawer open={showInviteCodeDialog} onOpenChange={setShowInviteCodeDialog}>
-        <DrawerContent>
-          <DrawerHeader>
-            <DrawerTitle>{t('Get Invite Code')}</DrawerTitle>
-            <DrawerDescription>
-              {t('Share this invite code with others to invite them to join this relay.')}
-            </DrawerDescription>
-          </DrawerHeader>
-          <div className="p-4">{content}</div>
-        </DrawerContent>
-      </Drawer>
-    )
-  }
 
   return (
     <Dialog open={showInviteCodeDialog} onOpenChange={setShowInviteCodeDialog}>

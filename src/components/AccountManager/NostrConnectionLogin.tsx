@@ -1,6 +1,8 @@
+import { copyText } from '@/lib/native-system'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { DEFAULT_NOSTRCONNECT_RELAY } from '@/constants'
+import { getNostrConnectClientMetadata } from '@/lib/nostr-connect'
 import { cn } from '@/lib/utils'
 import { useNostr } from '@/providers/NostrProvider'
 import { Check, Copy, Loader, ScanQrCode } from 'lucide-react'
@@ -54,8 +56,7 @@ export default function NostrConnectLogin({
       clientPubkey: getPublicKey(newPrivKey),
       relays: DEFAULT_NOSTRCONNECT_RELAY,
       secret: Math.random().toString(36).substring(7),
-      name: document.location.host,
-      url: document.location.origin
+      ...getNostrConnectClientMetadata()
     }
     const newConnectionString = createNostrConnectURI(newMeta)
     return {
@@ -105,7 +106,7 @@ export default function NostrConnectLogin({
   const copyConnectionString = async () => {
     if (!loginDetails.connectionString) return
 
-    navigator.clipboard.writeText(loginDetails.connectionString)
+    copyText(loginDetails.connectionString)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -185,73 +186,89 @@ export default function NostrConnectLogin({
   }, [])
 
   return (
-    <div className="relative flex flex-col gap-4">
-      <div ref={qrContainerRef} className="mb-3 flex w-full flex-col items-center space-y-3">
-        <a href={loginDetails.connectionString} aria-label="Open with Nostr signer app">
+    <div className="relative flex flex-col gap-5">
+      {/* Header */}
+      <h3 className="text-center text-lg font-semibold">{t('Connect a remote signer')}</h3>
+
+      {/* QR + connection string */}
+      <div ref={qrContainerRef} className="flex w-full flex-col items-center gap-3">
+        <div className="text-muted-foreground text-xs">{t('Scan with your signer app')}</div>
+        <a
+          href={loginDetails.connectionString}
+          aria-label={t('Open with Nostr signer app')}
+          className="ring-offset-background focus-visible:ring-ring rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+        >
           <QrCode size={qrCodeSize} value={loginDetails.connectionString} />
         </a>
+        <button
+          type="button"
+          onClick={copyConnectionString}
+          className="bg-muted text-muted-foreground hover:bg-muted/80 flex items-center gap-2 rounded-full px-3 py-1.5 text-xs transition-colors"
+          style={{
+            maxWidth: qrCodeSize > 0 ? `${Math.max(150, Math.min(qrCodeSize, 320))}px` : '100%'
+          }}
+        >
+          <span className="min-w-0 flex-1 truncate text-start">
+            {loginDetails.connectionString}
+          </span>
+          {copied ? (
+            <Check className="size-3.5 shrink-0" />
+          ) : (
+            <Copy className="size-3.5 shrink-0" />
+          )}
+        </button>
         {nostrConnectionErrMsg && (
-          <div className="pt-1 text-center text-xs text-destructive">{nostrConnectionErrMsg}</div>
+          <div className="text-destructive text-center text-xs">{nostrConnectionErrMsg}</div>
         )}
       </div>
-      <div className="mb-3 flex w-full justify-center">
-        <div
-          className="flex cursor-pointer items-center gap-2 rounded-full bg-muted px-3 py-2 text-sm text-muted-foreground transition-all hover:bg-muted/80"
-          style={{
-            width: qrCodeSize > 0 ? `${Math.max(150, Math.min(qrCodeSize, 320))}px` : 'auto'
-          }}
-          onClick={copyConnectionString}
-          role="button"
-          tabIndex={0}
-        >
-          <div className="min-w-0 flex-grow select-none truncate">
-            {loginDetails.connectionString}
-          </div>
-          <div className="flex-shrink-0">{copied ? <Check size={14} /> : <Copy size={14} />}</div>
-        </div>
+
+      {/* OR divider — matches AccountManager style */}
+      <div className="flex items-center gap-3">
+        <div className="bg-border h-px flex-1" />
+        <span className="text-muted-foreground/70 text-xs tracking-wide uppercase">{t('or')}</span>
+        <div className="bg-border h-px flex-1" />
       </div>
 
-      <div className="my-4 flex w-full items-center">
-        <div className="flex-grow border-t border-border/40"></div>
-        <span className="px-3 text-xs text-muted-foreground">OR</span>
-        <div className="flex-grow border-t border-border/40"></div>
-      </div>
-
-      <div className="w-full space-y-1">
-        <div className="flex items-start space-x-2">
-          <div className="relative flex-1">
-            <Input
-              placeholder="bunker://..."
-              value={bunkerInput}
-              onChange={handleInputChange}
-              className={errMsg ? 'border-destructive pr-10' : 'pr-10'}
-            />
-            <Button
-              size="sm"
-              variant="ghost"
-              className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 p-0"
-              onClick={startQrScan}
-              disabled={pending}
-            >
-              <ScanQrCode />
-            </Button>
-          </div>
-          <Button onClick={() => handleLogin()} disabled={pending}>
-            <Loader className={pending ? 'mr-2 animate-spin' : 'hidden'} />
-            {t('Login')}
+      {/* Bunker URI input — placeholder self-explains, no Label needed */}
+      <div className="space-y-1">
+        <div className="relative">
+          <Input
+            id="bunker-input"
+            placeholder="bunker://..."
+            value={bunkerInput}
+            onChange={handleInputChange}
+            className={cn('pe-10', errMsg && 'border-destructive')}
+          />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="absolute! inset-e-1 top-1/2 h-8 w-8 -translate-y-1/2 p-0"
+            onClick={startQrScan}
+            disabled={pending}
+            aria-label={t('Scan QR code')}
+          >
+            <ScanQrCode />
           </Button>
         </div>
-
-        {errMsg && <div className="pl-3 pt-1 text-xs text-destructive">{errMsg}</div>}
+        {errMsg && <div className="text-destructive text-xs">{errMsg}</div>}
       </div>
-      <Button variant="secondary" onClick={back} className="w-full">
-        {t('Back')}
-      </Button>
 
+      {/* Actions */}
+      <div className="flex gap-2">
+        <Button className="w-fit px-8" variant="secondary" type="button" onClick={back}>
+          {t('Back')}
+        </Button>
+        <Button className="flex-1" onClick={() => handleLogin()} disabled={pending}>
+          <Loader className={pending ? 'me-2 animate-spin' : 'hidden'} />
+          {t('Login')}
+        </Button>
+      </div>
+
+      {/* QR scanner overlay */}
       <div className={cn('flex h-full w-full justify-center', isScanning ? '' : 'hidden')}>
         <video
           ref={videoRef}
-          className="absolute inset-0 h-full w-full bg-background"
+          className="bg-background absolute inset-0 h-full w-full"
           autoPlay
           playsInline
           muted
@@ -259,10 +276,10 @@ export default function NostrConnectLogin({
         <Button
           variant="secondary"
           size="sm"
-          className="absolute right-2 top-2"
+          className="absolute top-2 right-2"
           onClick={stopQrScan}
         >
-          Cancel
+          {t('Cancel')}
         </Button>
       </div>
     </div>

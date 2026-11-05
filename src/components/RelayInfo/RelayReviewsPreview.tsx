@@ -12,7 +12,8 @@ import { compareEvents } from '@/lib/event'
 import { getStarsFromRelayReviewEvent } from '@/lib/event-metadata'
 import { toRelayReviews } from '@/lib/link'
 import { getDefaultRelayUrls } from '@/lib/relay'
-import { cn, isTouchDevice } from '@/lib/utils'
+import { canHover } from '@/lib/device'
+import { cn } from '@/lib/utils'
 import { useMuteList } from '@/providers/MuteListProvider'
 import { useNostr } from '@/providers/NostrProvider'
 import { useUserPreferences } from '@/providers/UserPreferencesProvider'
@@ -164,7 +165,7 @@ function ReviewCarousel({
 }) {
   const { t } = useTranslation()
   const { push } = useSecondaryPage()
-  const showPreviousAndNext = useMemo(() => !isTouchDevice(), [])
+  const showPreviousAndNext = useMemo(() => canHover(), [])
 
   return (
     <Carousel
@@ -173,7 +174,7 @@ function ReviewCarousel({
       }}
       plugins={[WheelGesturesPlugin()]}
     >
-      <CarouselContent className="ml-4 mr-2">
+      <CarouselContent className="ms-4 me-2">
         {myReview && (
           <Item key={myReview.id}>
             <RelayReviewCard event={myReview} className="border-primary/60 bg-primary/5" />
@@ -207,7 +208,7 @@ function Item({ children }: { children: React.ReactNode }) {
   return (
     <CarouselItem
       className={cn(
-        'basis-11/12 pl-0 pr-2',
+        'basis-11/12 ps-0 pe-2',
         enableSingleColumnLayout ? 'md:basis-5/12 lg:basis-7/12' : 'lg:basis-2/3 2xl:basis-5/12'
       )}
     >

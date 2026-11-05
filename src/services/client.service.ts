@@ -1,4 +1,6 @@
-import { ExtendedKind, SEARCHABLE_RELAY_URLS } from '@/constants'
+import { ExtendedKind } from '@/constants'
+import { BoundedMap } from '@/lib/bounded-map'
+import { ElectronPool } from '@/lib/electron-pool'
 import {
   compareEvents,
   getReplaceableCoordinate,
@@ -6,15 +8,18 @@ import {
   isReplaceableEvent
 } from '@/lib/event'
 import { getProfileFromEvent, getRelayListFromEvent } from '@/lib/event-metadata'
+import { isElectron } from '@/lib/platform'
 import { formatPubkey, isValidPubkey, pubkeyToNpub, userIdToPubkey } from '@/lib/pubkey'
-import { filterOutBigRelays, getDefaultRelayUrls } from '@/lib/relay'
+import { filterOutBigRelays, getDefaultRelayUrls, getSearchRelayUrls } from '@/lib/relay'
 import { SmartPool } from '@/lib/smart-pool'
 import { getPubkeysFromPTags, getServersFromServerTags, tagNameEquals } from '@/lib/tag'
 import { mergeTimelines } from '@/lib/timeline'
-import { isLocalNetworkUrl, isWebsocketUrl, normalizeUrl } from '@/lib/url'
+import { subscribeRelays } from '@/lib/relay-subscription'
+import { isInsecureUrl, isLocalNetworkUrl, isWebsocketUrl, normalizeUrl } from '@/lib/url'
 import { isSafari } from '@/lib/utils'
 import { ISigner, TProfile, TPublishOptions, TRelayList, TSubRequestFilter } from '@/types'
-import { sha256 } from '@noble/hashes/sha2'
+import { IRelay, IRelayPool } from '@/types/relay-pool'
+import { sha256 } from '@noble/hashes/sha2.js'
 import DataLoader from 'dataloader'
 import dayjs from 'dayjs'
 import FlexSearch from 'flexsearch'
@@ -28,22 +33,71 @@ import {
   nip19,
   VerifiedEvent
 } from 'nostr-tools'
-import { AbstractRelay } from 'nostr-tools/abstract-relay'
 import indexedDb from './indexed-db.service'
 import storage from './local-storage.service'
+import relayObservations from './relay-observation.service'
+import { publishRelayEvent } from '@/lib/relay-publication'
 
 type TTimelineRef = [string, number]
+
+// Upper bound on how many relay acceptances are required to treat a publish as
+// successful. With many target relays, demanding a full third can leave the
+// publish "failing" (and dumping a wall of relay errors into a toast) even
+// though the event already landed on plenty of relays. Once this many relays
+// accept, the event is discoverable, so we stop waiting for the 1/3 quota.
+const MAX_PUBLISH_SUCCESS_THRESHOLD = 4
+const EVENT_CACHE_MAX_SIZE = 10_000
+const REPLACEABLE_EVENT_CACHE_MAX_SIZE = 5_000
+const PROFILE_CACHE_MAX_SIZE = 5_000
+const SEEN_ON_CACHE_MAX_SIZE = 10_000
+const TIMELINE_CACHE_MAX_SIZE = 200
+const TIMELINE_MAX_REFS = 2_000
 
 class ClientService extends EventTarget {
   static instance: ClientService
 
   signer?: ISigner
   pubkey?: string
-  currentRelays: string[] = []
-  private pool: SmartPool
-  private externalSeenOn = new Map<string, Set<string>>()
+  private pool: IRelayPool
+  private externalSeenOn = new BoundedMap<string, Set<string>>({
+    maxSize: SEEN_ON_CACHE_MAX_SIZE
+  })
 
-  private timelines: Record<
+  // Relays the user is actively browsing (set by CurrentRelaysProvider) and the
+  // user's own configured relays (set by FavoriteRelaysProvider). Their insecure
+  // (ws://) subset is pushed to the pool as the trusted-insecure allowlist, so
+  // insecure relays coming from other people's data stay blocked.
+  private browsingRelays: string[] = []
+  private ownRelays: string[] = []
+  private trustedInsecureRelaysKey = ''
+
+  setCurrentRelays(urls: string[]) {
+    this.browsingRelays = urls
+    this.refreshTrustedInsecureRelays()
+  }
+
+  setOwnRelayUrls(urls: string[]) {
+    this.ownRelays = urls
+    relayObservations.setProtectedUrls(urls)
+    this.refreshTrustedInsecureRelays()
+  }
+
+  // SmartPool normalizes these URLs, so we collect them raw here.
+  private refreshTrustedInsecureRelays() {
+    const trusted = new Set<string>()
+    for (const url of this.ownRelays.concat(this.browsingRelays)) {
+      if (isWebsocketUrl(url) && isInsecureUrl(url)) {
+        trusted.add(url)
+      }
+    }
+    const sorted = Array.from(trusted).sort()
+    const key = sorted.join(',')
+    if (key === this.trustedInsecureRelaysKey) return
+    this.trustedInsecureRelaysKey = key
+    this.pool.setTrustedInsecureRelayUrls(sorted)
+  }
+
+  private timelines = new BoundedMap<
     string,
     | {
         refs: TTimelineRef[]
@@ -52,9 +106,17 @@ class ClientService extends EventTarget {
       }
     | string[]
     | undefined
-  > = {}
-  private replaceableEventCacheMap = new Map<string, NEvent>()
-  private eventCacheMap = new Map<string, Promise<NEvent | undefined>>()
+  >({ maxSize: TIMELINE_CACHE_MAX_SIZE })
+  private replaceableEventCacheMap = new BoundedMap<string, NEvent>({
+    maxSize: REPLACEABLE_EVENT_CACHE_MAX_SIZE
+  })
+  private eventCacheMap = new BoundedMap<string, Promise<NEvent | undefined>>({
+    maxSize: EVENT_CACHE_MAX_SIZE
+  })
+  private groupMetadataCache = new LRUCache<string, Promise<NEvent | undefined>>({
+    max: 200,
+    ttl: 60_000
+  })
   private eventDataLoader = new DataLoader<string, NEvent | undefined>(
     (ids) => Promise.all(ids.map((id) => this._fetchEvent(id))),
     { cacheMap: this.eventCacheMap }
@@ -70,7 +132,14 @@ class ClientService extends EventTarget {
 
   constructor() {
     super()
-    this.pool = new SmartPool()
+    if (isElectron()) {
+      this.pool = new ElectronPool(() =>
+        this.signer ? (evt) => this.signer!.signEvent(evt) : undefined
+      )
+    } else {
+      this.pool = new SmartPool({ observe: relayObservations.record })
+    }
+    this.pool.setAllowInsecure(storage.getAllowInsecureConnection())
     this.pool.trackRelays = true
   }
 
@@ -86,9 +155,13 @@ class ClientService extends EventTarget {
     await indexedDb.iterateProfileEvents((profileEvent) => this.addUsernameToIndex(profileEvent))
   }
 
+  setAllowInsecure(allow: boolean) {
+    this.pool.setAllowInsecure(allow)
+  }
+
   async determineTargetRelays(
     event: NEvent,
-    { specifiedRelayUrls, additionalRelayUrls }: TPublishOptions = {}
+    { specifiedRelayUrls, additionalRelayUrls, skipAuthorRelayLookup }: TPublishOptions = {}
   ) {
     if (event.kind === kinds.Report) {
       const targetEventId = event.tags.find(tagNameEquals('e'))?.[1]
@@ -108,14 +181,22 @@ class ClientService extends EventTarget {
         ![kinds.Contacts, kinds.Mutelist, ExtendedKind.PINNED_USERS].includes(event.kind)
       ) {
         const mentions: string[] = []
-        event.tags.forEach(([tagName, tagValue]) => {
-          if (
-            ['p', 'P'].includes(tagName) &&
-            !!tagValue &&
-            isValidPubkey(tagValue) &&
-            !mentions.includes(tagValue)
-          ) {
-            mentions.push(tagValue)
+        const addMention = (pubkey?: string) => {
+          if (pubkey && isValidPubkey(pubkey) && !mentions.includes(pubkey)) {
+            mentions.push(pubkey)
+          }
+        }
+        event.tags.forEach((tag) => {
+          const [tagName, tagValue] = tag
+          if (['p', 'P'].includes(tagName)) {
+            addMention(tagValue)
+          } else if (tagName === 'e' && tag[3] === 'root') {
+            // The thread root author may not be p-tagged (e.g. replying in one's
+            // own thread), but their read relays must still receive the reply
+            // since thread queries go through them
+            addMention(tag[4])
+          } else if (tagName === 'a' && tag[3] === 'root') {
+            addMention(tagValue?.split(':')[1])
           }
         })
         if (mentions.length > 0) {
@@ -126,8 +207,10 @@ class ClientService extends EventTarget {
         }
       }
 
-      const relayList = await this.fetchRelayList(event.pubkey)
-      relayList.write.forEach((url) => relaySet.add(url))
+      if (!skipAuthorRelayLookup) {
+        const relayList = await this.fetchRelayList(event.pubkey)
+        relayList.write.forEach((url) => relaySet.add(url))
+      }
 
       if (
         [
@@ -135,7 +218,8 @@ class ClientService extends EventTarget {
           kinds.Contacts,
           ExtendedKind.FAVORITE_RELAYS,
           ExtendedKind.BLOSSOM_SERVER_LIST,
-          ExtendedKind.RELAY_REVIEW
+          ExtendedKind.RELAY_REVIEW,
+          ExtendedKind.DM_RELAYS
         ].includes(event.kind)
       ) {
         defaultRelays.forEach((url) => relaySet.add(url))
@@ -159,7 +243,7 @@ class ClientService extends EventTarget {
 
   async determineRelaysByFilter(filter: Filter) {
     if (filter.search) {
-      return SEARCHABLE_RELAY_URLS
+      return getSearchRelayUrls()
     } else if (filter.authors?.length) {
       const relayLists = await this.fetchRelayLists(filter.authors)
       return Array.from(new Set(relayLists.flatMap((list) => list.write.slice(0, 5))))
@@ -175,8 +259,11 @@ class ClientService extends EventTarget {
     await new Promise<void>((resolve, reject) => {
       let successCount = 0
       let finishedCount = 0
-      // If one third of the relays have accepted the event, consider it a success
-      const successThreshold = uniqueRelayUrls.length / 3
+      let resolved = false
+      // Consider the publish a success once a third of the relays accept the
+      // event, but cap the requirement so a large relay set doesn't demand many
+      // acceptances — a handful of accepting relays is enough to propagate it.
+      const successThreshold = Math.min(uniqueRelayUrls.length / 3, MAX_PUBLISH_SUCCESS_THRESHOLD)
       const errors: { url: string; error: any }[] = []
 
       const checkCompletion = (url: string, success: boolean, error?: unknown) => {
@@ -188,8 +275,15 @@ class ClientService extends EventTarget {
         }
         finishedCount++
 
-        if (successCount >= successThreshold) {
+        if (!resolved && successCount >= successThreshold) {
+          resolved = true
           this.emitNewEvent(event, uniqueRelayUrls)
+          if (
+            event.kind === ExtendedKind.DM_RELAYS ||
+            event.kind === ExtendedKind.ENCRYPTION_KEY_ANNOUNCEMENT
+          ) {
+            this.updateReplaceableEventCache(event)
+          }
           resolve()
         }
         if (finishedCount >= uniqueRelayUrls.length) {
@@ -217,43 +311,32 @@ class ClientService extends EventTarget {
           }
 
           relay.publishTimeout = 10_000 // 10s
-          let hasAuthed = false
-
-          const publishPromise = async () => {
-            try {
-              await relay.publish(event)
-              that.trackEventSeenOn(event.id, relay)
-              checkCompletion(url, true)
-            } catch (error) {
-              if (
-                !hasAuthed &&
-                error instanceof Error &&
-                error.message.startsWith('auth-required') &&
-                !!that.signer
-              ) {
-                try {
-                  await relay.auth((authEvt: EventTemplate) => that.signer!.signEvent(authEvt))
-                  hasAuthed = true
-                  await publishPromise().catch(() => {
-                    // ignore
-                  })
-                  return
-                } catch (error) {
-                  checkCompletion(url, false, error)
-                }
-              } else {
-                checkCompletion(url, false, error)
-              }
-            }
+          // AUTH identifies the logged-in session, even when a temporary key
+          // authored the event being published.
+          try {
+            await publishRelayEvent(
+              relay,
+              event,
+              relayObservations.record,
+              that.signer
+                ? () =>
+                    relay
+                      .auth((authEvt: EventTemplate) => that.signer!.signEvent(authEvt))
+                      .then(() => undefined)
+                : undefined
+            )
+            that.trackEventSeenOn(event.id, relay)
+            checkCompletion(url, true)
+          } catch (error) {
+            checkCompletion(url, false, error)
           }
-
-          return publishPromise()
         })
       )
     })
   }
 
   emitNewEvent(event: NEvent, relays: string[] = []) {
+    this.addEventToCache(event)
     this.dispatchEvent(new CustomEvent('newEvent', { detail: { event, relays } }))
   }
 
@@ -374,7 +457,10 @@ class ClientService extends EventTarget {
     )
 
     const key = this.generateMultipleTimelinesKey(subRequests)
-    this.timelines[key] = subs.map((sub) => sub.timelineKey)
+    this.timelines.set(
+      key,
+      subs.map((sub) => sub.timelineKey)
+    )
 
     return {
       closer: () => {
@@ -389,7 +475,7 @@ class ClientService extends EventTarget {
   }
 
   async loadMoreTimeline(key: string, until: number, limit: number) {
-    const timeline = this.timelines[key]
+    const timeline = this.timelines.get(key)
     if (!timeline) return []
 
     if (!Array.isArray(timeline)) {
@@ -434,100 +520,31 @@ class ClientService extends EventTarget {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const that = this
     const _knownIds = new Set<string>()
-    let startedCount = relays.length
-    let eosedCount = 0
-    let eosed = false
-    let closedCount = 0
-    const closeReasons: string[] = []
-    const subPromises: Promise<{ close: () => void }>[] = []
-    relays.forEach((url) => {
-      let hasAuthed = false
-
-      subPromises.push(startSub())
-
-      async function startSub() {
-        const relay = await that.pool.ensureRelay(url).catch(() => {
-          return undefined
-        })
-        // cannot connect to relay
-        if (!relay) {
-          if (!eosed) {
-            eosedCount++
-            eosed = eosedCount >= startedCount
-            oneose?.(eosed)
-          }
-          return {
-            close: () => {}
-          }
+    const networkSub = subscribeRelays(this.pool, relays, filters, {
+      observe: relayObservations.record,
+      receivedEvent: (relay, id) => {
+        that.trackEventSeenOn(id, relay)
+      },
+      alreadyHaveEvent: (id: string) => {
+        const have = _knownIds.has(id)
+        if (have) return true
+        _knownIds.add(id)
+        return false
+      },
+      onevent,
+      oneose,
+      onclose,
+      onAllClose,
+      startLogin,
+      getAuthenticator: () => {
+        if (!that.signer) return undefined
+        return async (relay) => {
+          await relay.auth(async (authEvt: EventTemplate) => {
+            const evt = await that.signer!.signEvent(authEvt)
+            if (!evt) throw new Error('sign event failed')
+            return evt as VerifiedEvent
+          })
         }
-
-        return relay.subscribe(filters, {
-          receivedEvent: (relay, id) => {
-            that.trackEventSeenOn(id, relay)
-          },
-          alreadyHaveEvent: (id: string) => {
-            const have = _knownIds.has(id)
-            if (have) {
-              return true
-            }
-            _knownIds.add(id)
-            return false
-          },
-          onevent: (evt: NEvent) => {
-            onevent?.(evt)
-          },
-          oneose: () => {
-            // make sure eosed is not called multiple times
-            if (eosed) return
-
-            eosedCount++
-            eosed = eosedCount >= startedCount
-            oneose?.(eosed)
-          },
-          onclose: (reason: string) => {
-            // auth-required
-            if (reason.startsWith('auth-required') && !hasAuthed) {
-              // already logged in
-              if (that.signer) {
-                relay
-                  .auth(async (authEvt: EventTemplate) => {
-                    const evt = await that.signer!.signEvent(authEvt)
-                    if (!evt) {
-                      throw new Error('sign event failed')
-                    }
-                    return evt as VerifiedEvent
-                  })
-                  .then(() => {
-                    hasAuthed = true
-                    if (!eosed) {
-                      startedCount++
-                      subPromises.push(startSub())
-                    }
-                  })
-                  .catch(() => {
-                    // ignore
-                  })
-                return
-              }
-
-              // open login dialog
-              if (startLogin) {
-                startLogin()
-                return
-              }
-            }
-
-            // close the subscription
-            closedCount++
-            closeReasons.push(reason)
-            onclose?.(url, reason)
-            if (closedCount >= startedCount) {
-              onAllClose?.(closeReasons)
-            }
-            return
-          },
-          eoseTimeout: 10_000 // 10s
-        })
       }
     })
 
@@ -553,15 +570,7 @@ class ClientService extends EventTarget {
     return {
       close: () => {
         this.removeEventListener('newEvent', handleNewEventFromInternal)
-        subPromises.forEach((subPromise) => {
-          subPromise
-            .then((sub) => {
-              sub.close()
-            })
-            .catch((err) => {
-              console.error(err)
-            })
-        })
+        networkSub.close()
       }
     }
   }
@@ -590,7 +599,7 @@ class ClientService extends EventTarget {
   ) {
     const relays = Array.from(new Set(urls))
     const key = this.generateTimelineKey(relays, filter)
-    const timeline = this.timelines[key]
+    const timeline = this.timelines.get(key)
     let cachedEvents: NEvent[] = []
     let since: number | undefined
     if (timeline && !Array.isArray(timeline) && timeline.refs.length && needSort) {
@@ -623,7 +632,7 @@ class ClientService extends EventTarget {
           }
         }
 
-        const timeline = that.timelines[key]
+        const timeline = that.timelines.get(key)
         if (!timeline || Array.isArray(timeline) || !timeline.refs.length) {
           return
         }
@@ -645,6 +654,9 @@ class ClientService extends EventTarget {
 
         // insert the event to the right position
         timeline.refs.splice(idx, 0, [evt.id, evt.created_at])
+        if (timeline.refs.length > TIMELINE_MAX_REFS) {
+          timeline.refs.length = TIMELINE_MAX_REFS
+        }
       },
       oneose: (eosed) => {
         if (eosed && !eosedAt) {
@@ -665,14 +677,14 @@ class ClientService extends EventTarget {
             events.map((evt) => ({ event: evt, relays: this.getEventHints(evt.id) }))
           )
         }
-        const timeline = that.timelines[key]
+        const timeline = that.timelines.get(key)
         // no cache yet
         if (!timeline || Array.isArray(timeline) || !timeline.refs.length) {
-          that.timelines[key] = {
-            refs: events.map((evt) => [evt.id, evt.created_at]),
+          that.timelines.set(key, {
+            refs: events.slice(0, TIMELINE_MAX_REFS).map((evt) => [evt.id, evt.created_at]),
             filter,
             urls
-          }
+          })
           return onEvents([...events], true)
         }
 
@@ -684,14 +696,11 @@ class ClientService extends EventTarget {
 
         if (events.length >= filter.limit) {
           // if new refs are more than limit, means old refs are too old, replace them
-          timeline.refs = newRefs
+          timeline.refs = newRefs.slice(0, TIMELINE_MAX_REFS)
           onEvents([...events], true)
-          if (needSaveToDb) {
-            indexedDb.deleteEvents({ ...filter, until: events[events.length - 1].created_at })
-          }
         } else {
           // merge new refs with old refs
-          timeline.refs = newRefs.concat(timeline.refs)
+          timeline.refs = newRefs.concat(timeline.refs).slice(0, TIMELINE_MAX_REFS)
           onEvents([...events.concat(cachedEvents).slice(0, filter.limit)], true)
         }
       },
@@ -709,7 +718,7 @@ class ClientService extends EventTarget {
   }
 
   private async _loadMoreTimeline(key: string, until: number, limit: number) {
-    const timeline = this.timelines[key]
+    const timeline = this.timelines.get(key)
     if (!timeline || Array.isArray(timeline)) return []
 
     const { filter, urls, refs } = timeline
@@ -741,13 +750,16 @@ class ClientService extends EventTarget {
         .filter((evt) => evt.created_at < lastRefCreatedAt)
         .map((evt) => [evt.id, evt.created_at] as TTimelineRef)
     )
+    if (timeline.refs.length > TIMELINE_MAX_REFS) {
+      timeline.refs.length = TIMELINE_MAX_REFS
+    }
     return [...cachedEvents, ...events]
   }
 
   /** =========== Event =========== */
 
   getSeenEventRelays(eventId: string) {
-    return Array.from(this.pool.seenOn.get(eventId)?.values() || [])
+    return this.pool.getSeenRelays(eventId)
   }
 
   getSeenEventRelayUrls(eventId: string) {
@@ -767,13 +779,8 @@ class ClientService extends EventTarget {
     return this.getSeenEventRelayUrls(eventId).find((url) => !isLocalNetworkUrl(url)) ?? ''
   }
 
-  trackEventSeenOn(eventId: string, relay: AbstractRelay) {
-    let set = this.pool.seenOn.get(eventId)
-    if (!set) {
-      set = new Set()
-      this.pool.seenOn.set(eventId, set)
-    }
-    set.add(relay)
+  trackEventSeenOn(eventId: string, relay: IRelay) {
+    this.pool.trackEventSeen(eventId, relay)
   }
 
   trackEventExternalSeenOn(eventId: string, relayUrls: string[]) {
@@ -823,52 +830,105 @@ class ClientService extends EventTarget {
       filter,
       onevent
     )
+
+    // Dedup events from multiple relays
+    const seen = new Set<string>()
+    let deduped = events.filter((evt) => {
+      if (seen.has(evt.id)) return false
+      seen.add(evt.id)
+      return true
+    })
+
+    // Sort desc by created_at and trim to limit
+    const limit = Array.isArray(filter) ? undefined : filter.limit
+    if (limit) {
+      deduped.sort((a, b) => b.created_at - a.created_at)
+      deduped = deduped.slice(0, limit)
+    }
+
     if (cache) {
-      events.forEach((evt) => {
+      deduped.forEach((evt) => {
         this.addEventToCache(evt)
       })
     }
-    return events
+    return deduped
+  }
+
+  fetchGroupMetadata(groupId: string, relayUrls: string[]): Promise<NEvent | undefined> {
+    if (!groupId || !relayUrls.length) return Promise.resolve(undefined)
+
+    // Group IDs are scoped to their hosting relays, not globally unique.
+    const urls = Array.from(new Set(relayUrls)).sort()
+    const key = JSON.stringify([groupId, urls])
+    const cached = this.groupMetadataCache.get(key)
+    if (cached) return cached
+
+    const promise = this.fetchEvents(
+      urls,
+      { kinds: [ExtendedKind.GROUP_METADATA], '#d': [groupId], limit: 1 },
+      { cache: true }
+    )
+      .then(([event]) => event)
+      .catch((error) => {
+        this.groupMetadataCache.delete(key)
+        throw error
+      })
+    this.groupMetadataCache.set(key, promise)
+    return promise
   }
 
   async fetchEvent(id: string): Promise<NEvent | undefined> {
-    if (!/^[0-9a-f]{64}$/.test(id)) {
-      let eventId: string | undefined
-      let coordinate: string | undefined
-      const { type, data } = nip19.decode(id)
-      switch (type) {
-        case 'note':
-          eventId = data
-          break
-        case 'nevent':
-          eventId = data.id
-          break
-        case 'naddr':
-          coordinate = getReplaceableCoordinate(data.kind, data.pubkey, data.identifier)
-          break
+    let eventId = /^[0-9a-f]{64}$/.test(id) ? id : undefined
+    let coordinate: string | undefined
+    if (!eventId) {
+      if (/^\d+:[0-9a-f]{64}:/.test(id)) {
+        // Raw replaceable coordinate (kind:pubkey:d-tag), as found in a/A tags
+        coordinate = id
+      } else {
+        const { type, data } = nip19.decode(id)
+        switch (type) {
+          case 'note':
+            eventId = data
+            break
+          case 'nevent':
+            eventId = data.id
+            break
+          case 'naddr':
+            coordinate = getReplaceableCoordinate(data.kind, data.pubkey, data.identifier)
+            break
+        }
       }
-      if (coordinate) {
-        const cache = this.replaceableEventCacheMap.get(coordinate)
-        if (cache) {
-          return cache
-        }
-        const indexedDbCache = await indexedDb.getReplaceableEventByCoordinate(coordinate)
-        if (indexedDbCache) {
-          this.replaceableEventCacheMap.set(coordinate, indexedDbCache)
-          return indexedDbCache
-        }
-      } else if (eventId) {
-        const cache = this.eventCacheMap.get(eventId)
-        if (cache) {
-          return cache
-        }
+    }
+    if (coordinate) {
+      const cache = this.replaceableEventCacheMap.get(coordinate)
+      if (cache) {
+        return cache
+      }
+      const indexedDbCache = await indexedDb.getReplaceableEventByCoordinate(coordinate)
+      if (indexedDbCache) {
+        this.replaceableEventCacheMap.set(coordinate, indexedDbCache)
+        return indexedDbCache
+      }
+    } else if (eventId) {
+      const cache = this.eventCacheMap.get(eventId)
+      if (cache) {
+        return cache
+      }
+
+      const cacheFromIndexedDb = await indexedDb.getEventById(eventId)
+      if (cacheFromIndexedDb) {
+        this.trackEventExternalSeenOn(eventId, cacheFromIndexedDb.relays)
+        this.addEventToCache(cacheFromIndexedDb.event)
+        return cacheFromIndexedDb.event
       }
     }
     return this.eventDataLoader.load(id)
   }
 
   addEventToCache(event: NEvent) {
-    this.eventDataLoader.prime(event.id, Promise.resolve(event))
+    // A previous lookup may have cached `undefined`. A concrete event received
+    // later must replace that miss so ID-based thread readers can resolve it.
+    this.eventDataLoader.clear(event.id).prime(event.id, Promise.resolve(event))
     if (isReplaceableEvent(event.kind)) {
       const coordinate = getReplaceableCoordinateFromEvent(event)
       const cachedEvent = this.replaceableEventCacheMap.get(coordinate)
@@ -931,12 +991,19 @@ class ClientService extends EventTarget {
     }
 
     if (!event && author) {
-      const relayList = await this.fetchRelayList(author)
-      event = await this.fetchEventFromRelays(relayList.write.slice(0, 5), filter)
+      if (!relays.length) {
+        const relayList = await this.fetchRelayList(author)
+        relays = relayList.write.slice(0, 5)
+      }
+      event = await this.fetchEventFromRelays(relays, filter)
     }
 
     if (event && event.id !== id) {
       this.addEventToCache(event)
+    }
+
+    if (event && !isReplaceableEvent(event.kind)) {
+      indexedDb.putEvents([{ event, relays: this.getEventHints(event.id) }])
     }
 
     return event
@@ -1040,7 +1107,7 @@ class ClientService extends EventTarget {
   /** =========== Profile =========== */
 
   async searchNpubsFromLocal(query: string, limit: number = 100) {
-    const result = await this.userIndex.searchAsync(query, { limit })
+    const result = await this.userIndex.searchAsync(query.normalize('NFKD'), { limit })
     return result.map((pubkey) => pubkeyToNpub(pubkey as string)).filter(Boolean) as string[]
   }
 
@@ -1060,7 +1127,9 @@ class ClientService extends EventTarget {
           ?.split('@')
           .map((s: string) => s.trim())
           .join(' ') ?? ''
-      ].join(' ')
+      ]
+        .join(' ')
+        .normalize('NFKD')
       if (!text) return
 
       await this.userIndex.addAsync(profileEvent.pubkey, text)
@@ -1108,7 +1177,7 @@ class ClientService extends EventTarget {
 
     // If the user has no relay list, try current relays
     if (!relays.length) {
-      relays = filterOutBigRelays(this.currentRelays)
+      relays = filterOutBigRelays(this.browsingRelays)
     }
 
     const profileEvent = await this.fetchEventFromRelays(relays, {
@@ -1125,10 +1194,17 @@ class ClientService extends EventTarget {
     return profileEvent
   }
 
-  private profileDataloader = new DataLoader<string, TProfile | null, string>(async (ids) => {
-    const results = await Promise.allSettled(ids.map((id) => this._fetchProfile(id)))
-    return results.map((res) => (res.status === 'fulfilled' ? res.value : null))
-  })
+  private profileDataloader = new DataLoader<string, TProfile | null, string>(
+    async (ids) => {
+      const results = await Promise.allSettled(ids.map((id) => this._fetchProfile(id)))
+      return results.map((res) => (res.status === 'fulfilled' ? res.value : null))
+    },
+    {
+      cacheMap: new BoundedMap<string, Promise<TProfile | null>>({
+        maxSize: PROFILE_CACHE_MAX_SIZE
+      })
+    }
+  )
 
   async fetchProfile(id: string, skipCache = false): Promise<TProfile | null> {
     if (skipCache) {
@@ -1208,7 +1284,10 @@ class ClientService extends EventTarget {
   >(this.replaceableEventFromBigRelaysBatchLoadFn.bind(this), {
     batchScheduleFn: (callback) => setTimeout(callback, 50),
     maxBatchSize: 500,
-    cacheKeyFn: ({ pubkey, kind }) => `${pubkey}:${kind}`
+    cacheKeyFn: ({ pubkey, kind }) => `${pubkey}:${kind}`,
+    cacheMap: new BoundedMap<string, Promise<NEvent | null>>({
+      maxSize: REPLACEABLE_EVENT_CACHE_MAX_SIZE
+    })
   })
 
   private async replaceableEventFromBigRelaysBatchLoadFn(
@@ -1304,7 +1383,10 @@ class ClientService extends EventTarget {
     NEvent | null,
     string
   >(this.replaceableEventBatchLoadFn.bind(this), {
-    cacheKeyFn: ({ pubkey, kind, d }) => `${kind}:${pubkey}:${d ?? ''}`
+    cacheKeyFn: ({ pubkey, kind, d }) => `${kind}:${pubkey}:${d ?? ''}`,
+    cacheMap: new BoundedMap<string, Promise<NEvent | null>>({
+      maxSize: REPLACEABLE_EVENT_CACHE_MAX_SIZE
+    })
   })
 
   private async replaceableEventBatchLoadFn(
@@ -1373,16 +1455,20 @@ class ClientService extends EventTarget {
     pubkey: string,
     kind: number,
     d?: string,
-    updateCache = true
+    updateCache = true,
+    skipCache = false
   ) {
-    const storedEvent = await indexedDb.getReplaceableEvent(pubkey, kind, d)
-    if (storedEvent !== undefined) {
-      if (updateCache) {
-        this.replaceableEventDataLoader.load({ pubkey, kind, d }) // update cache in background
+    if (!skipCache) {
+      const storedEvent = await indexedDb.getReplaceableEvent(pubkey, kind, d)
+      if (storedEvent !== undefined) {
+        if (updateCache) {
+          this.replaceableEventDataLoader.load({ pubkey, kind, d }) // update cache in background
+        }
+        return storedEvent
       }
-      return storedEvent
     }
 
+    this.replaceableEventDataLoader.clear({ pubkey, kind, d })
     return await this.replaceableEventDataLoader.load({ pubkey, kind, d })
   }
 
@@ -1401,6 +1487,48 @@ class ClientService extends EventTarget {
 
   /** =========== Replaceable event =========== */
 
+  async fetchDmRelaysEvent(pubkey: string, updateCache = true, skipCache = false) {
+    return await this.fetchReplaceableEvent(
+      pubkey,
+      ExtendedKind.DM_RELAYS,
+      undefined,
+      updateCache,
+      skipCache
+    )
+  }
+
+  async fetchDmRelays(pubkey: string, updateCache = true) {
+    const dmRelayListEvent = await this.fetchDmRelaysEvent(pubkey, updateCache)
+    return dmRelayListEvent
+      ? Array.from(
+          new Set(
+            dmRelayListEvent.tags
+              .filter((tag) => tag[0] === 'relay' && tag[1])
+              .map((tag) => normalizeUrl(tag[1]))
+              .filter(Boolean)
+          )
+        )
+      : []
+  }
+
+  async fetchEncryptionKeyAnnouncementEvent(pubkey: string, updateCache = true, skipCache = false) {
+    return await this.fetchReplaceableEvent(
+      pubkey,
+      ExtendedKind.ENCRYPTION_KEY_ANNOUNCEMENT,
+      undefined,
+      updateCache,
+      skipCache
+    )
+  }
+
+  async updateEncryptionKeyAnnouncementCache(evt: NEvent) {
+    await this.updateReplaceableEventCache(evt)
+  }
+
+  async updateEmojiSetCache(evt: NEvent) {
+    await this.updateReplaceableEventCache(evt)
+  }
+
   async fetchFollowListEvent(pubkey: string, updateCache = true) {
     return await this.fetchReplaceableEvent(pubkey, kinds.Contacts, undefined, updateCache)
   }
@@ -1414,8 +1542,8 @@ class ClientService extends EventTarget {
     await this.updateReplaceableEventCache(evt)
   }
 
-  async fetchMuteListEvent(pubkey: string) {
-    return await this.fetchReplaceableEvent(pubkey, kinds.Mutelist)
+  async fetchMuteListEvent(pubkey: string, skipCache = false) {
+    return await this.fetchReplaceableEvent(pubkey, kinds.Mutelist, undefined, true, skipCache)
   }
 
   async fetchBookmarkListEvent(pubkey: string) {

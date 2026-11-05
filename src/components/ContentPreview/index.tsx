@@ -1,22 +1,29 @@
 import { ExtendedKind } from '@/constants'
-import { isMentioningMutedUsers } from '@/lib/event'
+import { getEventAuthorPubkey, isMentioningMutedUsers } from '@/lib/event'
+import { isNip34EventKind } from '@/lib/nip34'
 import { cn } from '@/lib/utils'
 import { useContentPolicy } from '@/providers/ContentPolicyProvider'
 import { useMuteList } from '@/providers/MuteListProvider'
+import { useNostr } from '@/providers/NostrProvider'
 import { Event, kinds } from 'nostr-tools'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import CommunityDefinitionPreview from './CommunityDefinitionPreview'
 import EmojiPackPreview from './EmojiPackPreview'
+import FavoriteRelaysPreview from './FavoriteRelaysPreview'
 import FollowPackPreview from './FollowPackPreview'
 import GroupMetadataPreview from './GroupMetadataPreview'
 import HighlightPreview from './HighlightPreview'
 import LiveEventPreview from './LiveEventPreview'
 import LongFormArticlePreview from './LongFormArticlePreview'
 import NormalContentPreview from './NormalContentPreview'
+import Nip34EventPreview from './Nip34EventPreview'
 import PictureNotePreview from './PictureNotePreview'
 import PollPreview from './PollPreview'
+import ReactionPreview from './ReactionPreview'
+import RepostPreview from './RepostPreview'
 import VideoNotePreview from './VideoNotePreview'
+import ZapPreview from './ZapPreview'
 
 export default function ContentPreview({
   event,
@@ -26,18 +33,19 @@ export default function ContentPreview({
   className?: string
 }) {
   const { t } = useTranslation()
+  const { pubkey } = useNostr()
   const { mutePubkeySet } = useMuteList()
   const { hideContentMentioningMutedUsers } = useContentPolicy()
   const isMuted = useMemo(
-    () => (event ? mutePubkeySet.has(event.pubkey) : false),
+    () => (event ? mutePubkeySet.has(getEventAuthorPubkey(event)) : false),
     [mutePubkeySet, event]
   )
   const isMentioningMuted = useMemo(
     () =>
-      hideContentMentioningMutedUsers && event
+      hideContentMentioningMutedUsers && event && getEventAuthorPubkey(event) !== pubkey
         ? isMentioningMutedUsers(event, mutePubkeySet)
         : false,
-    [event, mutePubkeySet]
+    [event, hideContentMentioningMutedUsers, mutePubkeySet, pubkey]
   )
 
   if (!event) {
@@ -58,9 +66,14 @@ export default function ContentPreview({
     )
   }
 
+  if (isNip34EventKind(event.kind)) {
+    return <Nip34EventPreview event={event} className={className} />
+  }
+
   if (
     [
       kinds.ShortTextNote,
+      ExtendedKind.GROUP_MESSAGE,
       ExtendedKind.COMMENT,
       ExtendedKind.VOICE,
       ExtendedKind.VOICE_COMMENT,
@@ -82,7 +95,12 @@ export default function ContentPreview({
     return <LongFormArticlePreview event={event} className={className} />
   }
 
-  if (event.kind === ExtendedKind.VIDEO || event.kind === ExtendedKind.SHORT_VIDEO) {
+  if (
+    event.kind === ExtendedKind.VIDEO ||
+    event.kind === ExtendedKind.SHORT_VIDEO ||
+    event.kind === ExtendedKind.ADDRESSABLE_NORMAL_VIDEO ||
+    event.kind === ExtendedKind.ADDRESSABLE_SHORT_VIDEO
+  ) {
     return <VideoNotePreview event={event} className={className} />
   }
 
@@ -108,6 +126,22 @@ export default function ContentPreview({
 
   if (event.kind === ExtendedKind.FOLLOW_PACK) {
     return <FollowPackPreview event={event} className={className} />
+  }
+
+  if (event.kind === ExtendedKind.FAVORITE_RELAYS) {
+    return <FavoriteRelaysPreview event={event} className={className} />
+  }
+
+  if (event.kind === kinds.Reaction || event.kind === ExtendedKind.EXTERNAL_CONTENT_REACTION) {
+    return <ReactionPreview event={event} className={className} />
+  }
+
+  if (event.kind === kinds.Repost || event.kind === kinds.GenericRepost) {
+    return <RepostPreview event={event} className={className} />
+  }
+
+  if (event.kind === kinds.Zap) {
+    return <ZapPreview event={event} className={className} />
   }
 
   return (

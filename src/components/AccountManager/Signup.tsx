@@ -1,7 +1,9 @@
+import { copyText } from '@/lib/native-system'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { downloadTextFile } from '@/lib/download'
 import { useNostr } from '@/providers/NostrProvider'
 import { Check, Copy, Download, RefreshCcw } from 'lucide-react'
 import { generateSecretKey } from 'nostr-tools'
@@ -29,15 +31,7 @@ export default function Signup({
   const [copied, setCopied] = useState(false)
 
   const handleDownload = () => {
-    const blob = new Blob([nsec], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'nostr-private-key.txt'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    downloadTextFile('nostr-private-key.txt', nsec)
   }
 
   const handleSignup = async () => {
@@ -63,7 +57,7 @@ export default function Signup({
           >
             {index + 1}
           </div>
-          {index < 1 && <div className="mx-1 h-0.5 w-12 bg-muted" />}
+          {index < 1 && <div className="bg-muted mx-1 h-0.5 w-12" />}
         </div>
       ))}
     </div>
@@ -76,7 +70,7 @@ export default function Signup({
 
         <div className="text-center">
           <h3 className="mb-2 text-lg font-semibold">{t('Create Your Nostr Account')}</h3>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-muted-foreground text-sm">
             {t('Generate your unique private key. This is your digital identity.')}
           </p>
         </div>
@@ -117,7 +111,7 @@ export default function Signup({
           </Button>
           <Button
             onClick={() => {
-              navigator.clipboard.writeText(nsec)
+              copyText(nsec)
               setCopied(true)
               setTimeout(() => setCopied(false), 2000)
             }}
@@ -129,7 +123,7 @@ export default function Signup({
           </Button>
         </div>
 
-        <div className="ml-2 flex items-center gap-2">
+        <div className="ms-2 flex items-center gap-2">
           <Checkbox
             id="acknowledge-checkbox"
             checked={checkedSaveKey}
@@ -160,7 +154,7 @@ export default function Signup({
 
       <div className="text-center">
         <h3 className="mb-2 text-lg font-semibold">{t('Secure Your Account')}</h3>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-muted-foreground text-sm">
           {t('Add an extra layer of protection with a password')}
         </p>
       </div>

@@ -1,5 +1,5 @@
 import { ExtendedKind, SPECIAL_TRUST_SCORE_FILTER_ID } from '@/constants'
-import { isMentioningMutedUsers } from '@/lib/event'
+import { getEventAuthorPubkey, isMentioningMutedUsers } from '@/lib/event'
 import { tagNameEquals } from '@/lib/tag'
 import { useContentPolicy } from '@/providers/ContentPolicyProvider'
 import { useMuteList } from '@/providers/MuteListProvider'
@@ -16,10 +16,12 @@ import { ZapNotification } from './ZapNotification'
 
 export function NotificationItem({
   notification,
-  isNew = false
+  isNew = false,
+  onVisibilityChange
 }: {
   notification: Event
   isNew?: boolean
+  onVisibilityChange?: (isVisible: boolean) => void
 }) {
   const { pubkey } = useNostr()
   const { mutePubkeySet } = useMuteList()
@@ -29,8 +31,9 @@ export function NotificationItem({
 
   useEffect(() => {
     const checkCanShow = async () => {
+      const authorPubkey = getEventAuthorPubkey(notification)
       // Check muted users
-      if (mutePubkeySet.has(notification.pubkey)) {
+      if (mutePubkeySet.has(authorPubkey)) {
         setCanShow(false)
         return
       }
@@ -44,7 +47,7 @@ export function NotificationItem({
       // Check trust score
       if (notification.kind !== kinds.Zap) {
         const threshold = getMinTrustScore(SPECIAL_TRUST_SCORE_FILTER_ID.NOTIFICATIONS)
-        if (!(await meetsMinTrustScore(notification.pubkey, threshold))) {
+        if (!(await meetsMinTrustScore(authorPubkey, threshold))) {
           setCanShow(false)
           return
         }
@@ -75,7 +78,13 @@ export function NotificationItem({
   if (!canShow) return null
 
   if (notification.kind === kinds.Reaction) {
-    return <ReactionNotification notification={notification} isNew={isNew} />
+    return (
+      <ReactionNotification
+        notification={notification}
+        isNew={isNew}
+        onVisibilityChange={onVisibilityChange}
+      />
+    )
   }
   if (
     notification.kind === kinds.ShortTextNote ||
@@ -83,19 +92,39 @@ export function NotificationItem({
     notification.kind === ExtendedKind.VOICE_COMMENT ||
     notification.kind === ExtendedKind.POLL
   ) {
-    return <MentionNotification notification={notification} isNew={isNew} />
+    return (
+      <MentionNotification
+        notification={notification}
+        isNew={isNew}
+        onVisibilityChange={onVisibilityChange}
+      />
+    )
   }
   if (notification.kind === kinds.Repost || notification.kind === kinds.GenericRepost) {
-    return <RepostNotification notification={notification} isNew={isNew} />
+    return (
+      <RepostNotification notification={notification} isNew={isNew} onVisibilityChange={onVisibilityChange} />
+    )
   }
   if (notification.kind === kinds.Zap) {
-    return <ZapNotification notification={notification} isNew={isNew} />
+    return <ZapNotification notification={notification} isNew={isNew} onVisibilityChange={onVisibilityChange} />
   }
   if (notification.kind === ExtendedKind.POLL_RESPONSE) {
-    return <PollResponseNotification notification={notification} isNew={isNew} />
+    return (
+      <PollResponseNotification
+        notification={notification}
+        isNew={isNew}
+        onVisibilityChange={onVisibilityChange}
+      />
+    )
   }
   if (notification.kind === kinds.Highlights) {
-    return <HighlightNotification notification={notification} isNew={isNew} />
+    return (
+      <HighlightNotification
+        notification={notification}
+        isNew={isNew}
+        onVisibilityChange={onVisibilityChange}
+      />
+    )
   }
   return null
 }

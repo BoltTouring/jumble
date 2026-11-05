@@ -1,8 +1,9 @@
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useFetchProfile } from '@/hooks'
+import { canHover } from '@/lib/device'
 import { toProfile } from '@/lib/link'
-import { cn, isTouchDevice } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { SecondaryPageLink } from '@/PageManager'
 import ProfileCard from '../ProfileCard'
 import TextWithEmojis from '../TextWithEmojis'
@@ -22,7 +23,7 @@ export default function Username({
   withoutSkeleton?: boolean
 }) {
   const { profile, isFetching } = useFetchProfile(userId)
-  const supportTouch = useMemo(() => isTouchDevice(), [])
+  const supportsHover = useMemo(() => canHover(), [])
   if (!profile && isFetching && !withoutSkeleton) {
     return (
       <div className="py-1">
@@ -33,7 +34,7 @@ export default function Username({
   if (!profile) return null
 
   const trigger = (
-    <div className={className}>
+    <div dir="auto" className={className}>
       <SecondaryPageLink
         to={toProfile(userId)}
         className="truncate hover:underline"
@@ -45,7 +46,7 @@ export default function Username({
     </div>
   )
 
-  if (supportTouch) {
+  if (!supportsHover) {
     return trigger
   }
 
@@ -85,7 +86,7 @@ export function SimpleUsername({
   const { username, emojis } = profile
 
   return (
-    <div className={className}>
+    <div dir="auto" className={className}>
       {showAt && '@'}
       <TextWithEmojis text={username} emojis={emojis} emojiClassName="mb-1" />
     </div>

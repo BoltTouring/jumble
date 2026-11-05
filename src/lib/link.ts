@@ -8,6 +8,8 @@ export const toNote = (eventOrId: Event | string) => {
   const nevent = getNoteBech32Id(eventOrId)
   return `/notes/${nevent}`
 }
+export const toArticleEditor = (event: Event) => `/articles/${getNoteBech32Id(event)}/edit`
+export const toNewArticle = () => '/articles/new'
 export const toJumbleNote = (eventOrId: Event | string) => {
   return `https://jumble.social${toNote(eventOrId)}`
 }
@@ -70,12 +72,21 @@ export const toRelaySettings = (tag?: 'mailbox' | 'favorite-relays') => {
 export const toWallet = () => '/settings/wallet'
 export const toPostSettings = () => '/settings/posts'
 export const toGeneralSettings = () => '/settings/general'
+export const toNotificationSettings = () => '/settings/notifications'
 export const toAppearanceSettings = () => '/settings/appearance'
 export const toTranslation = () => '/settings/translation'
 export const toEmojiPackSettings = () => '/settings/emoji-packs'
+export const toEmojiSetEditor = (eventOrId?: Event | string) => {
+  if (!eventOrId) return '/emoji-set-editor'
+  if (typeof eventOrId === 'string') return `/emoji-set-editor/${eventOrId}`
+  return `/emoji-set-editor/${getNoteBech32Id(eventOrId)}`
+}
+export const toStandaloneEmojiEditor = () => '/standalone-emoji-editor'
 export const toSystemSettings = () => '/settings/system'
+export const toAccountSettings = () => '/settings/account'
 export const toProfileEditor = () => '/profile-editor'
 export const toRelay = (url: string) => `/relays/${encodeURIComponent(url)}`
+export const toRelayActivity = (url: string) => `/relays/${encodeURIComponent(url)}/activity`
 export const toRelayReviews = (url: string) => `/relays/${encodeURIComponent(url)}/reviews`
 export const toMuteList = () => '/mutes'
 export const toRizful = () => '/rizful'
@@ -89,7 +100,18 @@ export const toFollowPack = (eventOrId: Event | string) => {
 export const toChachiChat = (relay: string, d: string) => {
   return `https://chachi.chat/${relay.replace(/^wss?:\/\//, '').replace(/\/$/, '')}/${d}`
 }
+
+export const toNostrordGroup = (relay: string, groupId: string) => {
+  const relayAddress = relay.replace(/^wss?:\/\//, '').replace(/\/$/, '')
+  return `https://web.nostrord.com/#/g/${encodeURIComponent(relayAddress)}/${encodeURIComponent(groupId)}`
+}
+
 export const toUserAggregationDetail = (feedId: string, pubkey: string) => {
   const npub = nip19.npubEncode(pubkey)
   return `/user-aggregation/${feedId}/${npub}`
+}
+
+export const toDmConversation = (pubkey: string) => {
+  const npub = pubkey.startsWith('npub') ? pubkey : nip19.npubEncode(pubkey)
+  return `/dms/${npub}`
 }

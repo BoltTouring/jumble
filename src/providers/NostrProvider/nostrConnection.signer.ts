@@ -1,5 +1,7 @@
+import { openExternalUrl } from '@/lib/native-system'
+import { withSignerApproval } from '@/lib/signer-approval'
 import { ISigner, TDraftEvent } from '@/types'
-import { bytesToHex } from '@noble/hashes/utils'
+import { bytesToHex } from '@noble/hashes/utils.js'
 import { BunkerSigner as NBunkerSigner, toBunkerURL } from 'nostr-tools/nip46'
 
 export class NostrConnectionSigner implements ISigner {
@@ -24,7 +26,7 @@ export class NostrConnectionSigner implements ISigner {
 
     this.signer = await NBunkerSigner.fromURI(this.clientSecretKey, this.connectionString, {
       onauth: (url) => {
-        window.open(url, '_blank')
+        openExternalUrl(url)
       }
     })
     this.bunkerString = toBunkerURL(this.signer.bp)
@@ -49,7 +51,7 @@ export class NostrConnectionSigner implements ISigner {
     if (!this.signer) {
       throw new Error('Not logged in')
     }
-    return this.signer.signEvent(draftEvent)
+    return withSignerApproval(this.signer.signEvent(draftEvent))
   }
 
   async nip04Encrypt(pubkey: string, plainText: string) {
@@ -64,6 +66,20 @@ export class NostrConnectionSigner implements ISigner {
       throw new Error('Not logged in')
     }
     return await this.signer.nip04Decrypt(pubkey, cipherText)
+  }
+
+  async nip44Encrypt(pubkey: string, plainText: string) {
+    if (!this.signer) {
+      throw new Error('Not logged in')
+    }
+    return await this.signer.nip44Encrypt(pubkey, plainText)
+  }
+
+  async nip44Decrypt(pubkey: string, cipherText: string) {
+    if (!this.signer) {
+      throw new Error('Not logged in')
+    }
+    return await this.signer.nip44Decrypt(pubkey, cipherText)
   }
 
   getClientSecretKey() {

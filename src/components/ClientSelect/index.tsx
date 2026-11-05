@@ -1,11 +1,10 @@
+import { copyText } from '@/lib/native-system'
 import { Button, ButtonProps } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
-import { Drawer, DrawerContent, DrawerOverlay, DrawerTrigger } from '@/components/ui/drawer'
 import { Separator } from '@/components/ui/separator'
 import { ExtendedKind } from '@/constants'
-import { getReplaceableEventIdentifier, getNoteBech32Id } from '@/lib/event'
-import { toChachiChat } from '@/lib/link'
-import { useScreenSize } from '@/providers/ScreenSizeProvider'
+import { getNoteBech32Id, getReplaceableEventIdentifier } from '@/lib/event'
+import { toChachiChat, toNostrordGroup } from '@/lib/link'
 import clientService from '@/services/client.service'
 import { ExternalLink } from 'lucide-react'
 import { Event, kinds, nip19 } from 'nostr-tools'
@@ -65,6 +64,10 @@ const clients: Record<string, { name: string; getUrl: (id: string) => string }> 
     name: 'Pareto',
     getUrl: (id: string) => `https://pareto.space/a/${id}`
   },
+  shosho: {
+    name: 'Shosho',
+    getUrl: (id: string) => `https://shosho.live/live/${id}`
+  },
   njump: {
     name: 'Njump',
     getUrl: (id: string) => `https://njump.me/${id}`
@@ -74,12 +77,12 @@ const clients: Record<string, { name: string; getUrl: (id: string) => string }> 
 export default function ClientSelect({
   event,
   originalNoteId,
+  children,
   ...props
 }: ButtonProps & {
   event?: Event
   originalNoteId?: string
 }) {
-  const { isSmallScreen } = useScreenSize()
   const [open, setOpen] = useState(false)
   const { t } = useTranslation()
 
@@ -107,7 +110,7 @@ export default function ClientSelect({
       case kinds.DraftLong:
         return ['yakihonne', 'coracle', 'habla', 'lumilumi', 'pareto', 'njump']
       case kinds.LiveEvent:
-        return ['zapStream', 'nostrudel', 'njump']
+        return ['zapStream', 'shosho', 'nostrudel', 'njump']
       case kinds.Date:
       case kinds.Time:
         return ['coracle', 'njump']
@@ -150,7 +153,7 @@ export default function ClientSelect({
         variant="ghost"
         className="w-full py-6 font-semibold"
         onClick={() => {
-          navigator.clipboard.writeText(originalNoteId ?? getNoteBech32Id(event!))
+          copyText(originalNoteId ?? getNoteBech32Id(event!))
           setOpen(false)
         }}
       >
@@ -161,32 +164,23 @@ export default function ClientSelect({
 
   const trigger = (
     <Button variant="outline" {...props}>
-      <ExternalLink /> {t('Open in another client')}
+      {children ?? (
+        <>
+          <ExternalLink /> {t('Open in another client')}
+        </>
+      )}
     </Button>
   )
 
-  if (isSmallScreen) {
-    return (
-      <div onClick={(e) => e.stopPropagation()}>
-        <Drawer open={open} onOpenChange={setOpen}>
-          <DrawerTrigger asChild>{trigger}</DrawerTrigger>
-          <DrawerOverlay
-            onClick={(e) => {
-              e.stopPropagation()
-              setOpen(false)
-            }}
-          />
-          <DrawerContent hideOverlay>{content}</DrawerContent>
-        </Drawer>
-      </div>
-    )
-  }
-
   return (
-    <div onClick={(e) => e.stopPropagation()}>
+    <div>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>{trigger}</DialogTrigger>
-        <DialogContent className="px-8" onOpenAutoFocus={(e) => e.preventDefault()}>
+        <DialogContent
+          title={t('Open in another client')}
+          bodyClassName="px-8"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
           {content}
         </DialogContent>
       </Dialog>
@@ -219,11 +213,18 @@ function RelayBasedGroupChatSelector({
   }, [event, originalNoteId])
 
   return (
-    <ClientSelectItem
-      onClick={() => setOpen(false)}
-      href={toChachiChat(relay, id)}
-      name="Chachi Chat"
-    />
+    <>
+      <ClientSelectItem
+        onClick={() => setOpen(false)}
+        href={toNostrordGroup(relay, id)}
+        name="Nostrord"
+      />
+      <ClientSelectItem
+        onClick={() => setOpen(false)}
+        href={toChachiChat(relay, id)}
+        name="Chachi Chat"
+      />
+    </>
   )
 }
 

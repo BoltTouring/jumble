@@ -1,6 +1,8 @@
 import {
   EmbeddedEmojiParser,
   EmbeddedEventParser,
+  EmbeddedLegacyEventParser,
+  EmbeddedLegacyMentionParser,
   EmbeddedMentionParser,
   EmbeddedUrlParser,
   parseContent
@@ -27,12 +29,14 @@ export default function Content({
       EmbeddedEventParser,
       EmbeddedMentionParser,
       EmbeddedUrlParser,
+      EmbeddedLegacyEventParser,
+      EmbeddedLegacyMentionParser,
       EmbeddedEmojiParser
     ])
   }, [content])
 
   return (
-    <span className={cn('pointer-events-none', className)}>
+    <span dir="auto" className={cn('pointer-events-none', className)}>
       {nodes.map((node, index) => {
         if (node.type === 'image' || node.type === 'images') {
           return index > 0 ? ` [${t('Image')}]` : `[${t('Image')}]`

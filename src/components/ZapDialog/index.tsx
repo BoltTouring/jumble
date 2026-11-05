@@ -1,28 +1,14 @@
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
-import {
-  Drawer,
-  DrawerContent,
-  DrawerHeader,
-  DrawerOverlay,
-  DrawerTitle
-} from '@/components/ui/drawer'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useNostr } from '@/providers/NostrProvider'
-import { useScreenSize } from '@/providers/ScreenSizeProvider'
 import { useZap } from '@/providers/ZapProvider'
 import lightning from '@/services/lightning.service'
 import stuffStatsService from '@/services/stuff-stats.service'
 import { Loader } from 'lucide-react'
 import { NostrEvent } from 'nostr-tools'
-import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from 'react'
+import { Dispatch, SetStateAction, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import UserAvatar from '../UserAvatar'
@@ -44,58 +30,6 @@ export default function ZapDialog({
   defaultComment?: string
 }) {
   const { t } = useTranslation()
-  const { isSmallScreen } = useScreenSize()
-  const drawerContentRef = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    const handleResize = () => {
-      if (drawerContentRef.current) {
-        drawerContentRef.current.style.setProperty('bottom', `env(safe-area-inset-bottom)`)
-      }
-    }
-
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', handleResize)
-      handleResize() // Initial call in case the keyboard is already open
-    }
-
-    return () => {
-      if (window.visualViewport) {
-        window.visualViewport.removeEventListener('resize', handleResize)
-      }
-    }
-  }, [])
-
-  if (isSmallScreen) {
-    return (
-      <Drawer open={open} onOpenChange={setOpen}>
-        <DrawerOverlay onClick={() => setOpen(false)} />
-        <DrawerContent
-          hideOverlay
-          onOpenAutoFocus={(e) => e.preventDefault()}
-          ref={drawerContentRef}
-          className="mb-4 flex flex-col gap-4 px-4"
-        >
-          <DrawerHeader>
-            <DrawerTitle className="flex items-center gap-2">
-              <div className="shrink-0">{t('Zap to')}</div>
-              <UserAvatar size="small" userId={pubkey} />
-              <Username userId={pubkey} className="h-5 w-0 flex-1 truncate text-start" />
-            </DrawerTitle>
-            <DialogDescription></DialogDescription>
-          </DrawerHeader>
-          <ZapDialogContent
-            open={open}
-            setOpen={setOpen}
-            recipient={pubkey}
-            event={event}
-            defaultAmount={defaultAmount}
-            defaultComment={defaultComment}
-          />
-        </DrawerContent>
-      </Drawer>
-    )
-  }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -104,7 +38,10 @@ export default function ZapDialog({
           <DialogTitle className="flex items-center gap-2">
             <div className="shrink-0">{t('Zap to')}</div>
             <UserAvatar size="small" userId={pubkey} />
-            <Username userId={pubkey} className="h-5 max-w-fit flex-1 truncate text-start" />
+            <Username
+              userId={pubkey}
+              className="h-5 min-w-0 flex-1 truncate text-start sm:max-w-fit"
+            />
           </DialogTitle>
         </DialogHeader>
         <ZapDialogContent
@@ -224,7 +161,7 @@ function ZapDialogContent({
                 e.target.setSelectionRange(val.length, val.length)
               })
             }}
-            className="w-full bg-transparent p-0 text-center text-6xl font-bold focus-visible:outline-none"
+            className="w-full bg-transparent p-0 text-center text-6xl font-bold focus-visible:outline-hidden"
           />
         </div>
         <Label htmlFor="sats">{t('Sats')}</Label>

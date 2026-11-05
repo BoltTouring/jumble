@@ -6,19 +6,11 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import {
-  Drawer,
-  DrawerContent,
-  DrawerDescription,
-  DrawerHeader,
-  DrawerTitle
-} from '@/components/ui/drawer'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { createReportDraftEvent } from '@/lib/draft-event'
 import { formatError } from '@/lib/error'
 import { useNostr } from '@/providers/NostrProvider'
-import { useScreenSize } from '@/providers/ScreenSizeProvider'
 import { Loader } from 'lucide-react'
 import { NostrEvent } from 'nostr-tools'
 import { useState } from 'react'
@@ -34,30 +26,7 @@ export default function ReportDialog({
   isOpen: boolean
   closeDialog: () => void
 }) {
-  const { isSmallScreen } = useScreenSize()
-
-  if (isSmallScreen) {
-    return (
-      <Drawer
-        open={isOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            closeDialog()
-          }
-        }}
-      >
-        <DrawerContent>
-          <DrawerHeader>
-            <DrawerTitle className="hidden" />
-            <DrawerDescription className="hidden" />
-          </DrawerHeader>
-          <div className="p-4">
-            <ReportContent event={event} closeDialog={closeDialog} />
-          </div>
-        </DrawerContent>
-      </Drawer>
-    )
-  }
+  const { t } = useTranslation()
 
   return (
     <Dialog
@@ -70,7 +39,7 @@ export default function ReportDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="hidden" />
+          <DialogTitle>{t('Report')}</DialogTitle>
           <DialogDescription className="hidden" />
         </DialogHeader>
         <ReportContent event={event} closeDialog={closeDialog} />
@@ -109,7 +78,7 @@ function ReportContent({ event, closeDialog }: { event: NostrEvent; closeDialog:
     <div className="w-full space-y-4">
       <RadioGroup value={reason} onValueChange={setReason} className="space-y-2">
         {['nudity', 'malware', 'profanity', 'illegal', 'spam', 'other'].map((item) => (
-          <div key={item} className="flex items-center space-x-2">
+          <div key={item} className="flex items-center gap-2">
             <RadioGroupItem value={item} id={item} />
             <Label htmlFor={item} className="text-base">
               {t(item)}

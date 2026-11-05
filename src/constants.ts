@@ -1,9 +1,17 @@
 import { kinds } from 'nostr-tools'
-import { TRelaySet } from './types'
+import {
+  TFeedTabConfig,
+  type TNotificationFilter,
+  TNotificationTabConfig,
+  TRelaySet
+} from './types'
 
 export const JUMBLE_API_BASE_URL = 'https://api.jumble.social'
 
+export const JUMBLE_BLOSSOM_SERVER = 'https://blossom.jumble.social/'
+
 export const RECOMMENDED_BLOSSOM_SERVERS = [
+  JUMBLE_BLOSSOM_SERVER,
   'https://blossom.band/',
   'https://blossom.primal.net/',
   'https://nostr.media/'
@@ -16,8 +24,10 @@ export const StorageKey = {
   ACCOUNTS: 'accounts',
   CURRENT_ACCOUNT: 'currentAccount',
   ADD_CLIENT_TAG: 'addClientTag',
-  NOTE_LIST_MODE: 'noteListMode',
+  DEFAULT_MIN_POW: 'defaultMinPow',
   NOTIFICATION_TYPE: 'notificationType',
+  NOTIFICATION_TABS: 'notificationTabs',
+  NOTIFICATION_TABS_VERSION: 'notificationTabsVersion',
   DEFAULT_ZAP_SATS: 'defaultZapSats',
   DEFAULT_ZAP_COMMENT: 'defaultZapComment',
   QUICK_ZAP: 'quickZap',
@@ -30,24 +40,52 @@ export const StorageKey = {
   DISMISSED_TOO_MANY_RELAYS_ALERT: 'dismissedTooManyRelaysAlert',
   SHOW_KINDS: 'showKinds',
   SHOW_KINDS_VERSION: 'showKindsVersion',
+  SHOW_KINDS_MAP: 'showKindsMap',
+  FEED_TABS: 'feedTabs',
   HIDE_CONTENT_MENTIONING_MUTED_USERS: 'hideContentMentioningMutedUsers',
   NOTIFICATION_LIST_STYLE: 'notificationListStyle',
   MEDIA_AUTO_LOAD_POLICY: 'mediaAutoLoadPolicy',
+  SHOW_LINK_PREVIEWS: 'showLinkPreviews',
   PROFILE_PICTURE_AUTO_LOAD_POLICY: 'profilePictureAutoLoadPolicy',
   SHOWN_CREATE_WALLET_GUIDE_TOAST_PUBKEYS: 'shownCreateWalletGuideToastPubkeys',
   SIDEBAR_COLLAPSE: 'sidebarCollapse',
   PRIMARY_COLOR: 'primaryColor',
   ENABLE_SINGLE_COLUMN_LAYOUT: 'enableSingleColumnLayout',
+  ENABLE_DM: 'enableDm',
+  USE_NIP22_REPLIES: 'useNip22Replies',
   FAVICON_URL_TEMPLATE: 'faviconUrlTemplate',
   FILTER_OUT_ONION_RELAYS: 'filterOutOnionRelays',
+  ALLOW_INSECURE_CONNECTION: 'allowInsecureConnection',
+  BLOSSOM_CACHE_SERVER_URL: 'blossomCacheServerUrl',
+  BLOSSOM_CACHE_SERVER_ENABLED: 'blossomCacheServerEnabled',
   QUICK_REACTION: 'quickReaction',
   QUICK_REACTION_EMOJI: 'quickReactionEmoji',
   NSFW_DISPLAY_POLICY: 'nsfwDisplayPolicy',
   DEFAULT_RELAY_URLS: 'defaultRelayUrls',
   MUTED_WORDS: 'mutedWords',
+  // Recheck accounts marked by the earlier migration, which could finish with no local words loaded.
+  MUTED_WORDS_MIGRATED_PUBKEYS: 'mutedWordsMigratedPubkeysV2',
   MIN_TRUST_SCORE: 'minTrustScore',
   MIN_TRUST_SCORE_MAP: 'minTrustScoreMap',
+  SEARCH_RELAY_URLS: 'searchRelayUrls',
+  SEARCH_HISTORY: 'searchHistory',
   HIDE_INDIRECT_NOTIFICATIONS: 'hideIndirectNotifications',
+  ENCRYPTION_KEY_PRIVKEY_MAP: 'encryptionKeyPrivkeyMap',
+  RETIRED_ENCRYPTION_KEY_PRIVKEY_MAP: 'retiredEncryptionKeyPrivkeyMap',
+  CLIENT_KEY_PRIVKEY_MAP: 'clientKeyPrivkeyMap',
+  LAST_READ_DM_TIME_MAP: 'lastReadDmTimeMap',
+  DM_LAST_SYNCED_AT_MAP: 'dmLastSyncedAtMap',
+  DM_BACKWARD_CURSOR_MAP: 'dmBackwardCursorMap',
+  PROCESSED_SYNC_REQUEST_IDS: 'processedSyncRequestIds',
+  DISABLE_NOTIFICATION_SYNC: 'disableNotificationSync',
+  SYSTEM_NOTIFICATIONS_ENABLED: 'systemNotificationsEnabled',
+  SYSTEM_GENERAL_NOTIFICATIONS_ENABLED: 'systemGeneralNotificationsEnabled',
+  SYSTEM_DM_NOTIFICATIONS_ENABLED: 'systemDmNotificationsEnabled',
+  SYSTEM_NOTIFICATIONS_PROMPTED: 'systemNotificationsPrompted',
+  LONG_FORM_DRAFT_MAP: 'longFormDraftMap',
+  DISMISSED_DESKTOP_APP_TIP: 'dismissedDesktopAppTip',
+  DISMISSED_PSSTPSST_PROMOTION: 'dismissedPsstPsstPromotion',
+  NOTE_LIST_MODE: 'noteListMode', // deprecated
   ENABLE_LIVE_FEED: 'enableLiveFeed', // deprecated
   HIDE_UNTRUSTED_NOTES: 'hideUntrustedNotes', // deprecated
   HIDE_UNTRUSTED_INTERACTIONS: 'hideUntrustedInteractions', // deprecated
@@ -65,46 +103,104 @@ export const StorageKey = {
   FEED_TYPE: 'feedType' // deprecated
 }
 
+export const DEFAULT_NOTIFICATION_FILTERS: TNotificationFilter[] = [
+  'mentions',
+  'replies',
+  'likes',
+  'quotes',
+  'reposts',
+  'zaps',
+  'highlights',
+  'pollResponses'
+]
+
+export const DEFAULT_NOTIFICATION_TABS: TNotificationTabConfig[] = [
+  { id: 'all', builtin: 'all', label: 'All', filters: DEFAULT_NOTIFICATION_FILTERS },
+  {
+    id: 'mentions',
+    builtin: 'mentions',
+    label: 'Mentions',
+    filters: ['mentions', 'replies', 'quotes', 'highlights']
+  },
+  {
+    id: 'reactions',
+    builtin: 'reactions',
+    label: 'Reactions',
+    filters: ['likes', 'reposts', 'pollResponses']
+  },
+  { id: 'zaps', builtin: 'zaps', label: 'Zaps', filters: ['zaps'] }
+]
+
 export const ApplicationDataKey = {
   NOTIFICATIONS_SEEN_AT: 'seen_notifications_at'
 }
 
 export const BIG_RELAY_URLS = [
-  'wss://relay.damus.io/',
   'wss://nos.lol/',
   'wss://relay.primal.net/',
-  'wss://offchain.pub/'
+  'wss://offchain.pub/',
+  'wss://relay.ditto.pub/'
 ]
 
-export const SEARCHABLE_RELAY_URLS = [
-  'wss://search.nos.today/',
-  'wss://relay.ditto.pub/',
-  'wss://relay.nostr.band/'
-]
+export const SEARCHABLE_RELAY_URLS = ['wss://search.nos.today/', 'wss://search.nostrarchives.com/']
 
 export const TRENDING_NOTES_RELAY_URLS = ['wss://trending.relays.land/']
 
 export const GROUP_METADATA_EVENT_KIND = 39000
 
 export const ExtendedKind = {
+  GROUP_MESSAGE: 9,
   EXTERNAL_CONTENT_REACTION: 17,
+  SEAL: 13,
+  RUMOR_CHAT: 14,
+  RUMOR_FILE: 15,
   PICTURE: 20,
   VIDEO: 21,
   SHORT_VIDEO: 22,
+  GIFT_WRAP: 1059,
   POLL: 1068,
   POLL_RESPONSE: 1018,
   COMMENT: 1111,
   VOICE: 1222,
   VOICE_COMMENT: 1244,
+  GIT_PATCH: 1617,
+  GIT_PULL_REQUEST: 1618,
+  GIT_PULL_REQUEST_UPDATE: 1619,
+  GIT_ISSUE: 1621,
+  GIT_STATUS_OPEN: 1630,
+  GIT_STATUS_APPLIED: 1631,
+  GIT_STATUS_CLOSED: 1632,
+  GIT_STATUS_DRAFT: 1633,
+  CLIENT_KEY_ANNOUNCEMENT: 4454,
+  KEY_TRANSFER: 4455,
   PINNED_USERS: 10010,
   FAVORITE_RELAYS: 10012,
+  GIT_GRASP_LIST: 10317,
+  ENCRYPTION_KEY_ANNOUNCEMENT: 10044,
+  DM_RELAYS: 10050,
   BLOSSOM_SERVER_LIST: 10063,
   FOLLOW_PACK: 39089,
   RELAY_REVIEW: 31987,
+  GIT_REPOSITORY: 30617,
+  GIT_REPOSITORY_STATE: 30618,
   GROUP_METADATA: 39000,
   ADDRESSABLE_NORMAL_VIDEO: 34235,
   ADDRESSABLE_SHORT_VIDEO: 34236
 }
+
+export const NIP_34_KINDS = [
+  ExtendedKind.GIT_PATCH,
+  ExtendedKind.GIT_PULL_REQUEST,
+  ExtendedKind.GIT_PULL_REQUEST_UPDATE,
+  ExtendedKind.GIT_ISSUE,
+  ExtendedKind.GIT_STATUS_OPEN,
+  ExtendedKind.GIT_STATUS_APPLIED,
+  ExtendedKind.GIT_STATUS_CLOSED,
+  ExtendedKind.GIT_STATUS_DRAFT,
+  ExtendedKind.GIT_GRASP_LIST,
+  ExtendedKind.GIT_REPOSITORY,
+  ExtendedKind.GIT_REPOSITORY_STATE
+]
 
 export const ALLOWED_FILTER_KINDS = [
   kinds.ShortTextNote,
@@ -125,15 +221,36 @@ export const ALLOWED_FILTER_KINDS = [
 
 export const SUPPORTED_KINDS = [
   ...ALLOWED_FILTER_KINDS,
+  ...NIP_34_KINDS,
+  ExtendedKind.GROUP_MESSAGE,
   ExtendedKind.RELAY_REVIEW,
+  ExtendedKind.FAVORITE_RELAYS,
   kinds.Emojisets,
-  ExtendedKind.FOLLOW_PACK
+  ExtendedKind.FOLLOW_PACK,
+  kinds.Reaction,
+  kinds.Zap,
+  ExtendedKind.EXTERNAL_CONTENT_REACTION,
+  kinds.CommunityDefinition,
+  kinds.LiveEvent,
+  ExtendedKind.GROUP_METADATA
+]
+
+export const DEFAULT_FEED_TABS: TFeedTabConfig[] = [
+  { id: 'posts', builtin: 'posts', label: 'Notes', hideReplies: true },
+  { id: 'postsAndReplies', builtin: 'postsAndReplies', label: 'Replies' },
+  { id: '24h', builtin: '24h', label: '24h Pulse' },
+  {
+    id: 'articles',
+    builtin: 'articles',
+    label: 'Articles',
+    kinds: [kinds.LongFormArticle]
+  }
 ]
 
 export const URL_REGEX =
-  /https?:\/\/[\w\p{L}\p{N}\p{M}&.\-/?=#@%+_:!~*()]+[^\s.,;:'"(\]}!?，。；："'！？】）]/giu
+  /https?:\/\/[\w\p{L}\p{N}\p{M}&.\-/?=#@%+_:!~*()$,;'|[\]^]+[^\s.,;:'"(\]}!?，。；："'！？】）]/giu
 export const WS_URL_REGEX =
-  /wss?:\/\/[\w\p{L}\p{N}\p{M}&.\-/?=#@%+_:!~*()]+[^\s.,;:'"(\]}!?，。；："'！？】）]/giu
+  /wss?:\/\/[\w\p{L}\p{N}\p{M}&.\-/?=#@%+_:!~*()$,;'|[\]^]+[^\s.,;:'"(\]}!?，。；："'！？】）]/giu
 export const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/
 export const EMOJI_SHORT_CODE_REGEX = /:[a-zA-Z0-9_-]+:/g
 export const EMBEDDED_EVENT_REGEX = /nostr:(note1[a-z0-9]{58}|nevent1[a-z0-9]+|naddr1[a-z0-9]+)/g
@@ -163,10 +280,31 @@ export const DEFAULT_NIP_96_SERVICE = 'https://nostr.build'
 export const DEFAULT_NOSTRCONNECT_RELAY = [
   'wss://bucket.coracle.social/',
   'wss://relay.primal.net/',
-  'wss://relay.damus.io/'
+  'wss://relay.ditto.pub/'
 ]
 
+export const DEFAULT_DM_RELAYS = [
+  'wss://nip17.com/',
+  'wss://nos.lol/',
+  'wss://relay.primal.net/',
+  'wss://offchain.pub/'
+]
+
+export const DM_TIME_RANDOMIZATION_SECONDS = 2 * 24 * 60 * 60 // 2 days in seconds
+
+// When the encryption key is rotated, the old key is kept around so messages
+// still encrypted to it (by contacts who haven't learned the new key yet) can
+// be decrypted. Old keys are pruned once they exceed this age or this count.
+export const ENCRYPTION_KEY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000 // 90 days
+export const MAX_RETIRED_ENCRYPTION_KEYS = 10
+
+// Key-sync request ids are only remembered long enough to avoid duplicate
+// prompts while relays replay recent sync-request events.
+export const PROCESSED_SYNC_REQUEST_ID_RETENTION_MS = 10 * 60 * 1000
+
 export const DEFAULT_FAVICON_URL_TEMPLATE = 'https://{hostname}/favicon.ico'
+
+export const DEFAULT_BLOSSOM_CACHE_SERVER_URL = 'http://127.0.0.1:24242'
 
 export const POLL_TYPE = {
   MULTIPLE_CHOICE: 'multiplechoice',
@@ -186,7 +324,6 @@ export const MEDIA_AUTO_LOAD_POLICY = {
 
 export const PROFILE_PICTURE_AUTO_LOAD_POLICY = {
   ALWAYS: 'always',
-  WIFI_ONLY: 'wifi-only',
   NEVER: 'never'
 } as const
 
@@ -483,10 +620,33 @@ export const SPECIAL_TRUST_SCORE_FILTER_ID = {
   SEARCH: 'search',
   HASHTAG: 'hashtag',
   NAK: 'nak',
-  TRENDING: 'trending'
+  TRENDING: 'trending',
+  DM: 'dm'
+}
+
+export const SPECIAL_FEED_ID = {
+  ...SPECIAL_TRUST_SCORE_FILTER_ID,
+  FOLLOWING: 'following',
+  PINNED: 'pinned'
 }
 
 export const COMMUNITY_RELAY_SETS = import.meta.env.VITE_COMMUNITY_RELAY_SETS as TRelaySet[]
 export const COMMUNITY_RELAYS = import.meta.env.VITE_COMMUNITY_RELAYS as string[]
 
 export const IS_COMMUNITY_MODE = COMMUNITY_RELAY_SETS.length > 0 || COMMUNITY_RELAYS.length > 0
+
+// Link preview metadata service. Override via VITE_LINK_PREVIEW_SERVER.
+export const LINK_PREVIEW_SERVER =
+  (import.meta.env.VITE_LINK_PREVIEW_SERVER as string | undefined) ?? 'https://scout.jumble.social'
+
+// Pomegranate (threshold-key-shard NIP-46 remote signer) — "Login with Google".
+export const POMEGRANATE_ENABLED = true
+export const POMEGRANATE_CENTRAL_URL = 'https://auth.njump.me/'
+export const POMEGRANATE_OPERATOR_URLS = [
+  'https://po.jumble.social/',
+  'https://po.coracle.social/',
+  'https://po.njump.me/',
+  'https://po.f7z.io/',
+  'https://po.yakihonne.com/',
+  'https://po.oslim.dev/'
+]

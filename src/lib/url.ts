@@ -7,6 +7,46 @@ export function isWebsocketUrl(url: string): boolean {
   }
 }
 
+/**
+ * Returns a normalized URL only when it is safe to open as a web link.
+ *
+ * Keep this deliberately narrower than the set of schemes a browser can
+ * navigate to. User-controlled Nostr content must never be able to create a
+ * `javascript:`/`data:` link; non-web schemes should use dedicated UI where
+ * their semantics can be validated separately.
+ */
+export function getSafeExternalUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
+export function isInsecureUrl(url: string): boolean {
+  // Consider .onion URLs as secure (accessed over Tor, no mixed-content concern)
+  if (isOnionUrl(url)) {
+    return false
+  }
+
+  // NOTE: We intentionally do NOT exempt local network URLs here. Although
+  // loopback (localhost/127.0.0.1/::1) is a "potentially trustworthy" origin,
+  // other private ranges (192.168.x, 10.x, 172.16-31.x, *.local, fe80::, fc/fd)
+  // are NOT, so loading their http:// resources from an https page triggers the
+  // browser's mixed-content "not secure" warning. Insecure relays the user
+  // actually owns or is browsing are allowed via the pool's trusted-relay
+  // allowlist instead (see SmartPool.setTrustedInsecureRelayUrls).
+
+  try {
+    const protocol = new URL(url).protocol
+    return protocol === 'ws:' || protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
 export function isOnionUrl(url: string): boolean {
   try {
     const hostname = new URL(url).hostname
@@ -91,8 +131,8 @@ export function isLocalNetworkUrl(urlString: string): boolean {
     const url = new URL(urlString)
     const hostname = url.hostname
 
-    // Check if it's localhost
-    if (hostname === 'localhost' || hostname === '::1') {
+    // Check if it's localhost or an mDNS .local hostname (e.g. umbrel.local)
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname.endsWith('.local')) {
       return true
     }
 
@@ -178,13 +218,18 @@ export const truncateUrl = (url: string, maxLength: number = 40) => {
     const urlObj = new URL(url)
     let domain = urlObj.hostname
     let path = urlObj.pathname
+    const hasHiddenSuffix = Boolean(urlObj.search || urlObj.hash)
 
     if (domain.startsWith('www.')) {
       domain = domain.slice(4)
     }
 
+    if (domain.length > maxLength - 3) {
+      return domain.slice(0, maxLength - 3) + '...'
+    }
+
     if (!path || path === '/') {
-      return domain
+      return domain + (hasHiddenSuffix ? '...' : '')
     }
 
     if (path.endsWith('/')) {
@@ -193,11 +238,11 @@ export const truncateUrl = (url: string, maxLength: number = 40) => {
 
     const u = domain + path
 
-    if (u.length > maxLength) {
+    if (u.length + (hasHiddenSuffix ? 3 : 0) > maxLength) {
       return domain + path.slice(0, maxLength - domain.length - 3) + '...'
     }
 
-    return u
+    return u + (hasHiddenSuffix ? '...' : '')
   } catch {
     // invalid URL
     let truncated = url

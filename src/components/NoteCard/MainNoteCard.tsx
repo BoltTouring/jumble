@@ -3,6 +3,7 @@ import { toNote } from '@/lib/link'
 import { cn } from '@/lib/utils'
 import { useSecondaryPage } from '@/PageManager'
 import { Event } from 'nostr-tools'
+import ClickableCard from '../ClickableCard'
 import Collapsible from '../Collapsible'
 import Note from '../Note'
 import StuffStats from '../StuffStats'
@@ -27,17 +28,13 @@ export default function MainNoteCard({
   const { push } = useSecondaryPage()
 
   return (
-    <div
-      className={className}
-      onClick={(e) => {
-        e.stopPropagation()
-        push(toNote(originalNoteId ?? event))
-      }}
-    >
+    <ClickableCard className={className} onClick={() => push(toNote(originalNoteId ?? event))}>
       <div
         className={cn(
-          'clickable transition-all duration-200',
-          embedded ? 'rounded-xl border bg-card p-3 sm:p-4' : 'py-3 hover:bg-accent/30'
+          'clickable transition-all duration-200 [--image-strip-bleed-start:var(--image-strip-bleed)]',
+          embedded
+            ? 'bg-card rounded-xl border p-3 [--image-strip-bleed:0.75rem] sm:p-4 sm:[--image-strip-bleed:1rem]'
+            : 'hover:bg-accent/30 py-3 [--image-strip-bleed:1rem]'
         )}
       >
         <Collapsible alwaysExpand={embedded}>
@@ -53,6 +50,6 @@ export default function MainNoteCard({
         {!embedded && <StuffStats className="mt-3 px-4" stuff={event} />}
       </div>
       {!embedded && <Separator />}
-    </div>
+    </ClickableCard>
   )
 }

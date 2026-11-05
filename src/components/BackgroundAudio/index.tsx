@@ -2,45 +2,41 @@ import mediaManager from '@/services/media-manager.service'
 import { useEffect, useState } from 'react'
 import AudioPlayer from '../AudioPlayer'
 
+type BackgroundAudioSource = { src: string; time?: number; pubkey?: string }
+
 export default function BackgroundAudio({ className }: { className?: string }) {
-  const [backgroundAudioSrc, setBackgroundAudioSrc] = useState<string | null>(null)
-  const [backgroundAudio, setBackgroundAudio] = useState<React.ReactNode>(null)
+  const [{ source, requestId }, setPlayback] = useState<{
+    source: BackgroundAudioSource | null
+    requestId: number
+  }>({ source: null, requestId: 0 })
 
   useEffect(() => {
     const handlePlayAudioBackground = (event: Event) => {
-      const { src, time } = (event as CustomEvent).detail
-      if (backgroundAudioSrc === src) return
-
-      setBackgroundAudio(
-        <FloatingAudioPlayer key={src + time} src={src} time={time} className={className} />
-      )
-      setBackgroundAudioSrc(src)
+      const next = (event as CustomEvent<BackgroundAudioSource>).detail
+      // Each event explicitly transfers playback from an inline player. A fresh
+      // player applies the latest seek position and autoplay, even for the same URL/time.
+      setPlayback((previous) => ({ source: next, requestId: previous.requestId + 1 }))
     }
-
-    const handleStopAudioBackground = () => {
-      setBackgroundAudio(null)
-    }
+    const handleStopAudioBackground = () =>
+      setPlayback((previous) => ({ ...previous, source: null }))
 
     mediaManager.addEventListener('playAudioBackground', handlePlayAudioBackground)
     mediaManager.addEventListener('stopAudioBackground', handleStopAudioBackground)
-
     return () => {
       mediaManager.removeEventListener('playAudioBackground', handlePlayAudioBackground)
       mediaManager.removeEventListener('stopAudioBackground', handleStopAudioBackground)
     }
   }, [])
 
-  return backgroundAudio
-}
-
-function FloatingAudioPlayer({
-  src,
-  time,
-  className
-}: {
-  src: string
-  time?: number
-  className?: string
-}) {
-  return <AudioPlayer src={src} className={className} startTime={time} autoPlay isMinimized />
+  return source ? (
+    <AudioPlayer
+      key={requestId}
+      src={source.src}
+      pubkey={source.pubkey}
+      className={className}
+      startTime={source.time}
+      autoPlay
+      isMinimized
+    />
+  ) : null
 }

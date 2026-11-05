@@ -25,6 +25,8 @@ export default function StuffStats({
   className?: string
   classNames?: {
     buttonBar?: string
+    topList?: string
+    topListContent?: string
   }
   fetchIfNotExisting?: boolean
   displayTopZapsAndLikes?: boolean
@@ -40,57 +42,49 @@ export default function StuffStats({
     stuffStatsService.fetchStuffStats(stuff, pubkey).finally(() => setLoading(false))
   }, [event, fetchIfNotExisting])
 
-  if (isSmallScreen) {
-    return (
-      <div className={cn('select-none', className)}>
-        {displayTopZapsAndLikes && (
-          <>
-            <TopZaps stuff={stuff} />
-            <Likes stuff={stuff} />
-          </>
-        )}
-        <div
-          className={cn(
-            'flex h-5 items-center justify-between [&_svg]:size-5',
-            loading ? 'animate-pulse' : '',
-            classNames?.buttonBar
-          )}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <ReplyButton stuff={stuff} />
-          <RepostButton stuff={stuff} />
-          <LikeButton stuff={stuff} />
-          <ZapButton stuff={stuff} />
-          <BookmarkButton stuff={stuff} />
-          <SeenOnButton stuff={stuff} />
-        </div>
-      </div>
-    )
-  }
-
+  // Keep action buttons mounted across breakpoints: reply/quote composers own
+  // their draft state below these buttons, even though they render in portals.
   return (
     <div className={cn('select-none', className)}>
-      {displayTopZapsAndLikes && (
-        <>
-          <TopZaps stuff={stuff} />
-          <Likes stuff={stuff} />
-        </>
-      )}
-      <div className="flex h-5 justify-between [&_svg]:size-4">
+      <div
+        className={cn(
+          'flex h-5 [&_svg]:shrink-0',
+          isSmallScreen ? 'items-center justify-between [&_svg]:size-5' : '[&_svg]:size-4',
+          classNames?.buttonBar
+        )}
+      >
         <div
-          className={cn('flex items-center', loading ? 'animate-pulse' : '')}
-          onClick={(e) => e.stopPropagation()}
+          className={cn(
+            isSmallScreen
+              ? 'contents'
+              : 'grid min-w-0 flex-1 grid-cols-4 items-center [&>button]:min-w-0 [&>button]:justify-self-start [&>button]:px-0',
+            loading ? 'animate-pulse' : ''
+          )}
         >
           <ReplyButton stuff={stuff} />
           <RepostButton stuff={stuff} />
           <LikeButton stuff={stuff} />
           <ZapButton stuff={stuff} />
         </div>
-        <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-          <BookmarkButton stuff={stuff} />
+        <div className={isSmallScreen ? 'contents' : 'flex shrink-0 items-center [&>button]:ps-1'}>
+          {!isSmallScreen && <BookmarkButton stuff={stuff} />}
           <SeenOnButton stuff={stuff} />
         </div>
       </div>
+      {displayTopZapsAndLikes && (
+        <div className="mt-3 flex flex-col gap-3 border-t pt-3 empty:hidden">
+          <TopZaps
+            stuff={stuff}
+            scrollAreaClassName={cn('mb-0 pb-0', classNames?.topList)}
+            contentClassName={classNames?.topListContent}
+          />
+          <Likes
+            stuff={stuff}
+            scrollAreaClassName={cn('mb-0 pb-0', classNames?.topList)}
+            contentClassName={classNames?.topListContent}
+          />
+        </div>
+      )}
     </div>
   )
 }

@@ -1,6 +1,8 @@
 import { ExtendedKind } from '@/constants'
+import { BoundedMap } from '@/lib/bounded-map'
 import {
   getEventKey,
+  getEventAuthorPubkey,
   getKeyFromTag,
   getParentTag,
   getReplaceableCoordinateFromEvent,
@@ -9,21 +11,25 @@ import {
   isReplaceableEvent,
   isReplyNoteEvent
 } from '@/lib/event'
-import { getDefaultRelayUrls } from '@/lib/relay'
+import { getDefaultRelayUrls, mergeRelayUrls } from '@/lib/relay'
 import { generateBech32IdFromETag } from '@/lib/tag'
 import client from '@/services/client.service'
+import indexedDb from '@/services/indexed-db.service'
+import lightning from '@/services/lightning.service'
 import dayjs from 'dayjs'
 import { Filter, kinds, NostrEvent } from 'nostr-tools'
 
 type TRootInfo =
-  | { type: 'E'; id: string; pubkey: string }
-  | { type: 'A'; id: string; pubkey: string; relay?: string }
+  | { type: 'E'; id: string; logicalPubkey: string }
+  | { type: 'A'; id: string; logicalPubkey: string; relay?: string }
   | { type: 'I'; id: string }
 
 class ThreadService {
   static instance: ThreadService
 
-  private rootInfoCache = new Map<string, Promise<TRootInfo | undefined>>()
+  private rootInfoCache = new BoundedMap<string, Promise<TRootInfo | undefined>>({
+    maxSize: 2_000
+  })
   private subscriptions = new Map<
     string,
     {
@@ -35,15 +41,18 @@ class ThreadService {
       until?: number
     }
   >()
-  private threadMap = new Map<string, NostrEvent[]>()
-  private processedReplyKeys = new Set<string>()
+  // The topology is cheap to retain and preserves replies discovered while
+  // browsing. Event bodies are resolved by ClientService when the UI needs them.
+  private threadMap = new Map<string, string[]>()
   private parentKeyMap = new Map<string, string>()
-  private descendantCache = new Map<string, Map<string, NostrEvent[]>>()
+  private descendantCache = new BoundedMap<string, Map<string, string[]>>({ maxSize: 500 })
+  private ancestorChainCache = new BoundedMap<string, string[]>({ maxSize: 2_000 })
 
   private threadListeners = new Map<string, Set<() => void>>()
   private allDescendantThreadsListeners = new Map<string, Set<() => void>>()
-  private readonly EMPTY_ARRAY: NostrEvent[] = []
-  private readonly EMPTY_MAP: Map<string, NostrEvent[]> = new Map()
+  private readonly EMPTY_ARRAY: string[] = []
+  private readonly EMPTY_STRING_ARRAY: string[] = []
+  private readonly EMPTY_MAP: Map<string, string[]> = new Map()
 
   constructor() {
     if (!ThreadService.instance) {
@@ -65,18 +74,19 @@ class ThreadService {
 
     const _subscribe = async () => {
       let relayUrls: string[] = []
-      const rootPubkey = (rootInfo as { pubkey?: string }).pubkey ?? event?.pubkey
-      if (rootPubkey) {
-        const relayList = await client.fetchRelayList(rootPubkey)
+      const logicalPubkey = rootInfo.type === 'I' ? undefined : rootInfo.logicalPubkey
+      if (logicalPubkey) {
+        const relayList = await client.fetchRelayList(logicalPubkey)
         relayUrls = relayList.read
       }
-      relayUrls = relayUrls.concat(getDefaultRelayUrls()).slice(0, 4)
-
-      // If current event is protected, we can assume its replies are also protected and stored on the same relays
-      if (event && isProtectedEvent(event)) {
-        const seenOn = client.getSeenEventRelayUrls(event.id)
-        relayUrls.concat(...seenOn)
-      }
+      const seenOnRelayUrls = event ? client.getSeenEventRelayUrls(event.id) : []
+      const rootRelayUrls = rootInfo.type === 'A' && rootInfo.relay ? [rootInfo.relay] : []
+      relayUrls = mergeRelayUrls(5, relayUrls, getDefaultRelayUrls())
+      relayUrls =
+        event && isProtectedEvent(event)
+          ? mergeRelayUrls(relayUrls, seenOnRelayUrls)
+          : mergeRelayUrls(5, relayUrls, seenOnRelayUrls)
+      relayUrls = mergeRelayUrls(relayUrls, rootRelayUrls)
 
       const filters: (Omit<Filter, 'since' | 'until'> & {
         limit: number
@@ -87,13 +97,13 @@ class ThreadService {
           kinds: [kinds.ShortTextNote],
           limit
         })
-        if (event?.kind !== kinds.ShortTextNote) {
-          filters.push({
-            '#E': [rootInfo.id],
-            kinds: [ExtendedKind.COMMENT, ExtendedKind.VOICE_COMMENT],
-            limit
-          })
-        }
+        // Some clients use NIP-22 comments to reply to kind 1 events, so this
+        // filter is needed even when the root event itself is kind 1.
+        filters.push({
+          '#E': [rootInfo.id],
+          kinds: [ExtendedKind.COMMENT, ExtendedKind.VOICE_COMMENT],
+          limit
+        })
       } else if (rootInfo.type === 'A') {
         filters.push(
           {
@@ -107,9 +117,6 @@ class ThreadService {
             limit
           }
         )
-        if (rootInfo.relay) {
-          relayUrls.push(rootInfo.relay)
-        }
       } else {
         filters.push({
           '#I': [rootInfo.id],
@@ -117,19 +124,37 @@ class ThreadService {
           limit
         })
       }
+
+      const knownReplyIds = this.getDescendantReplyIds(rootInfo.id)
+      let storedReplies: NostrEvent[]
+      if (knownReplyIds.length > 0) {
+        const storedItems = await indexedDb.getEventsByIds(knownReplyIds)
+        storedItems.forEach(({ event, relays }) => {
+          client.trackEventExternalSeenOn(event.id, relays)
+        })
+        storedReplies = storedItems.map(({ event }) => event)
+      } else {
+        storedReplies = (
+          await Promise.all(
+            filters.map((filter) => client.getEventsFromIndexed({ ...filter, limit: undefined }))
+          )
+        ).flat()
+      }
+      this.addRepliesToThread(storedReplies, false)
+
       let resolve: () => void
       const _promise = new Promise<void>((res) => {
         resolve = res
       })
       const { closer, timelineKey } = await client.subscribeTimeline(
         filters.map((filter) => ({
-          urls: relayUrls.slice(0, 8),
+          urls: relayUrls,
           filter
         })),
         {
           onEvents: (events, eosed) => {
             if (events.length > 0) {
-              this.addRepliesToThread(events)
+              this.addRepliesToThread(events, false)
             }
             if (eosed) {
               const subscription = this.subscriptions.get(rootInfo.id)
@@ -140,9 +165,10 @@ class ThreadService {
             }
           },
           onNew: (evt) => {
-            this.addRepliesToThread([evt])
+            this.addRepliesToThread([evt], false)
           }
-        }
+        },
+        { needSaveToDb: true }
       )
       await _promise
       return { closer, timelineKey }
@@ -199,66 +225,119 @@ class ThreadService {
     return !!newUntil
   }
 
-  addRepliesToThread(replies: NostrEvent[]) {
-    const newReplyEventMap = new Map<string, NostrEvent[]>()
+  addRepliesToThread(replies: NostrEvent[], persist = true) {
+    const newReplyIdMap = new Map<string, string[]>()
+    const affectedParentKeys = new Set<string>()
+    const refreshedParentKeys = new Set<string>()
+    const persistableReplies: NostrEvent[] = []
+    let topologyChanged = false
+
     replies.forEach((reply) => {
       const key = getEventKey(reply)
-      if (this.processedReplyKeys.has(key)) return
-      this.processedReplyKeys.add(key)
+      client.addEventToCache(reply)
 
       if (!isReplyNoteEvent(reply)) return
+
+      const knownParentKey = this.parentKeyMap.get(key)
+      if (knownParentKey) {
+        affectedParentKeys.add(knownParentKey)
+        refreshedParentKeys.add(knownParentKey)
+        return
+      }
+      if (persist) persistableReplies.push(reply)
 
       const parentTag = getParentTag(reply)
       if (parentTag) {
         const parentKey = getKeyFromTag(parentTag.tag)
         if (parentKey) {
-          const thread = newReplyEventMap.get(parentKey) ?? []
-          thread.push(reply)
-          newReplyEventMap.set(parentKey, thread)
+          const thread = newReplyIdMap.get(parentKey) ?? []
+          thread.push(key)
+          newReplyIdMap.set(parentKey, thread)
           this.parentKeyMap.set(key, parentKey)
+          affectedParentKeys.add(parentKey)
+          topologyChanged = true
         }
       }
     })
-    if (newReplyEventMap.size === 0) return
 
-    for (const [key, newReplyEvents] of newReplyEventMap.entries()) {
-      const thread = this.threadMap.get(key) ?? []
-      thread.push(...newReplyEvents)
-      this.threadMap.set(key, thread)
+    if (persistableReplies.length > 0) {
+      void indexedDb
+        .putEvents(
+          persistableReplies.map((event) => ({
+            event,
+            relays: client.getEventHints(event.id)
+          }))
+        )
+        .catch((error) => console.error('Failed to persist thread replies:', error))
     }
 
+    for (const [key, newReplyIds] of newReplyIdMap.entries()) {
+      const thread = this.threadMap.get(key) ?? []
+      this.threadMap.set(key, [...thread, ...newReplyIds])
+    }
+
+    // A known ID may have failed to resolve earlier and just become available
+    // through ClientService. Replace the array so useSyncExternalStore readers
+    // retry their existing IDs without keeping another event-body cache here.
+    for (const key of refreshedParentKeys) {
+      if (newReplyIdMap.has(key)) continue
+      const thread = this.threadMap.get(key)
+      if (thread) this.threadMap.set(key, [...thread])
+    }
+
+    if (affectedParentKeys.size === 0) return
+
     this.descendantCache.clear()
-    for (const key of newReplyEventMap.keys()) {
+    if (topologyChanged) this.ancestorChainCache.clear()
+    for (const key of affectedParentKeys) {
       this.notifyThreadUpdate(key)
       this.notifyAllDescendantThreadsUpdate(key)
     }
   }
 
-  getThread(stuffKey: string): NostrEvent[] {
+  getAncestorChain(currentKey: string, rootKey: string): string[] {
+    if (!currentKey || !rootKey || currentKey === rootKey) return this.EMPTY_STRING_ARRAY
+
+    const cacheKey = `${currentKey}:${rootKey}`
+    const cached = this.ancestorChainCache.get(cacheKey)
+    if (cached) return cached
+
+    const chain: string[] = []
+    const visited = new Set<string>([currentKey])
+    let key: string | undefined = this.parentKeyMap.get(currentKey)
+    while (key && key !== rootKey && !visited.has(key)) {
+      chain.unshift(key)
+      visited.add(key)
+      key = this.parentKeyMap.get(key)
+    }
+
+    const result = chain.length === 0 ? this.EMPTY_STRING_ARRAY : chain
+    this.ancestorChainCache.set(cacheKey, result)
+    return result
+  }
+
+  getThread(stuffKey: string): string[] {
     return this.threadMap.get(stuffKey) ?? this.EMPTY_ARRAY
   }
 
-  getAllDescendantThreads(stuffKey: string): Map<string, NostrEvent[]> {
+  getAllDescendantThreads(stuffKey: string): Map<string, string[]> {
     const cached = this.descendantCache.get(stuffKey)
     if (cached) return cached
 
     const build = () => {
-      const thread = this.threadMap.get(stuffKey)
-      if (!thread || thread.length === 0) {
+      const replyIds = this.threadMap.get(stuffKey)
+      if (!replyIds || replyIds.length === 0) {
         return this.EMPTY_MAP
       }
 
-      const result = new Map<string, NostrEvent[]>()
+      const result = new Map<string, string[]>()
       const keys: string[] = [stuffKey]
       while (keys.length > 0) {
         const key = keys.pop()!
-        const thread = this.threadMap.get(key) ?? []
-        if (thread.length > 0) {
-          result.set(key, thread)
-          thread.forEach((reply) => {
-            const replyKey = getEventKey(reply)
-            keys.push(replyKey)
-          })
+        const childIds = this.threadMap.get(key) ?? []
+        if (childIds.length > 0) {
+          result.set(key, childIds)
+          keys.push(...childIds)
         }
       }
       return result
@@ -327,35 +406,71 @@ class ThreadService {
     if (cache) return cache
 
     const _parseRootInfo = async (): Promise<TRootInfo | undefined> => {
-      let root: TRootInfo = event
-        ? isReplaceableEvent(event.kind)
+      let root: TRootInfo
+      if (event) {
+        const logicalPubkey = getEventAuthorPubkey(event)
+        root = isReplaceableEvent(event.kind)
           ? {
               type: 'A',
               id: getReplaceableCoordinateFromEvent(event),
-              pubkey: event.pubkey,
+              logicalPubkey,
               relay: client.getEventHint(event.id)
             }
-          : { type: 'E', id: event.id, pubkey: event.pubkey }
-        : { type: 'I', id: externalContent! }
+          : { type: 'E', id: event.id, logicalPubkey }
+      } else {
+        root = { type: 'I', id: externalContent! }
+      }
 
-      const rootTag = getRootTag(event)
+      // A zap receipt's e tag is the zap target, not a thread root marker.
+      const rootTag = event?.kind === kinds.Zap ? undefined : getRootTag(event)
       if (rootTag?.type === 'e') {
-        const [, rootEventHexId, , , rootEventPubkey] = rootTag.tag
-        if (rootEventHexId && rootEventPubkey) {
-          root = { type: 'E', id: rootEventHexId, pubkey: rootEventPubkey }
-        } else {
+        const [, rootEventHexId, , markerOrPubkey, markerPubkey] = rootTag.tag
+        const rootEventPubkey = rootTag.tag[0] === 'E' ? markerOrPubkey : markerPubkey
+        const rootKind = Number(event?.tags.find(([tagName]) => tagName === 'K')?.[1])
+        const rootAuthorPubkey =
+          rootKind === kinds.Zap
+            ? event?.tags.find(([tagName]) => tagName === 'P')?.[1]
+            : rootEventPubkey
+        if (rootEventHexId && rootAuthorPubkey) {
+          root = {
+            type: 'E',
+            id: rootEventHexId,
+            logicalPubkey: rootAuthorPubkey
+          }
+        }
+        if (rootKind === kinds.Zap) {
+          const rootEventId = generateBech32IdFromETag(rootTag.tag)
+          if (!rootEventId) return undefined
+          const rootEvent = await client.fetchEvent(rootEventId)
+          if (
+            !rootEvent ||
+            rootEvent.kind !== kinds.Zap ||
+            !(await lightning.validateZapReceipt(rootEvent))
+          ) {
+            return undefined
+          }
+          root = {
+            type: 'E',
+            id: rootEvent.id,
+            logicalPubkey: getEventAuthorPubkey(rootEvent)
+          }
+        } else if (!rootAuthorPubkey) {
           const rootEventId = generateBech32IdFromETag(rootTag.tag)
           if (rootEventId) {
             const rootEvent = await client.fetchEvent(rootEventId)
             if (rootEvent) {
-              root = { type: 'E', id: rootEvent.id, pubkey: rootEvent.pubkey }
+              root = {
+                type: 'E',
+                id: rootEvent.id,
+                logicalPubkey: getEventAuthorPubkey(rootEvent)
+              }
             }
           }
         }
       } else if (rootTag?.type === 'a') {
         const [, coordinate, relay] = rootTag.tag
         const [, pubkey] = coordinate.split(':')
-        root = { type: 'A', id: coordinate, pubkey, relay }
+        root = { type: 'A', id: coordinate, logicalPubkey: pubkey, relay }
       } else if (rootTag?.type === 'i') {
         root = { type: 'I', id: rootTag.tag[1] }
       }
@@ -371,6 +486,22 @@ class ThreadService {
     return typeof stuff === 'string'
       ? { event: undefined, externalContent: stuff, stuffKey: stuff }
       : { event: stuff, externalContent: undefined, stuffKey: getEventKey(stuff) }
+  }
+
+  private getDescendantReplyIds(rootKey: string): string[] {
+    const result: string[] = []
+    const pending = [rootKey]
+    const visited = new Set<string>()
+    while (pending.length > 0) {
+      const parentKey = pending.pop()!
+      for (const replyId of this.threadMap.get(parentKey) ?? []) {
+        if (visited.has(replyId)) continue
+        visited.add(replyId)
+        result.push(replyId)
+        pending.push(replyId)
+      }
+    }
+    return result
   }
 }
 

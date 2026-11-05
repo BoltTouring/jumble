@@ -1,241 +1,128 @@
-import { ExtendedKind, NOTIFICATION_LIST_STYLE, SPECIAL_TRUST_SCORE_FILTER_ID } from '@/constants'
+import { SPECIAL_TRUST_SCORE_FILTER_ID } from '@/constants'
 import { useInfiniteScroll } from '@/hooks'
-import { compareEvents } from '@/lib/event'
-import { getDefaultRelayUrls } from '@/lib/relay'
-import { mergeTimelines } from '@/lib/timeline'
-import { isTouchDevice } from '@/lib/utils'
+import { useNotificationFilter } from '@/hooks/useNotificationFilter'
+import { prefersTouchInteraction } from '@/lib/device'
+import { getNotificationFilterType } from '@/lib/notification'
+import { cn } from '@/lib/utils'
 import { usePrimaryPage } from '@/PageManager'
+import { useDeepBrowsing } from '@/providers/DeepBrowsingProvider'
 import { useNostr } from '@/providers/NostrProvider'
 import { useNotification } from '@/providers/NotificationProvider'
 import { useUserPreferences } from '@/providers/UserPreferencesProvider'
-import client from '@/services/client.service'
-import stuffStatsService from '@/services/stuff-stats.service'
-import threadService from '@/services/thread.service'
-import { TNotificationType } from '@/types'
+import notificationService from '@/services/notification.service'
 import dayjs from 'dayjs'
-import { NostrEvent, kinds, matchFilter } from 'nostr-tools'
-import {
-  forwardRef,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useMemo,
-  useRef,
-  useState
-} from 'react'
+import { NostrEvent } from 'nostr-tools'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import PullToRefresh from 'react-simple-pull-to-refresh'
+import PullToRefresh from '../PullToRefresh'
 import { LoadingBar } from '../LoadingBar'
+import NotificationTabsCustomizeDialog from '../NotificationTabsCustomizeDialog'
 import { RefreshButton } from '../RefreshButton'
 import Tabs from '../Tabs'
 import TrustScoreFilter from '../TrustScoreFilter'
 import { NotificationItem } from './NotificationItem'
 import { NotificationSkeleton } from './NotificationItem/Notification'
 
-const LIMIT = 100
 const SHOW_COUNT = 30
+const LOAD_MORE_LIMIT = 100
 
-const NotificationList = forwardRef((_, ref) => {
+export default function NotificationList() {
   const { t } = useTranslation()
-  const { current, display } = usePrimaryPage()
-  const active = useMemo(() => current === 'notifications' && display, [current, display])
+  const { current } = usePrimaryPage()
   const { pubkey } = useNostr()
   const { getNotificationsSeenAt } = useNotification()
-  const { notificationListStyle } = useUserPreferences()
-  const [notificationType, setNotificationType] = useState<TNotificationType>('all')
+  const { notificationTabs } = useUserPreferences()
+  const filterFn = useNotificationFilter()
+  const visibleTabs = useMemo(
+    () => notificationTabs.filter((tab) => !tab.hidden),
+    [notificationTabs]
+  )
+  const [notificationType, setNotificationType] = useState(visibleTabs[0].id)
+  const [customizeOpen, setCustomizeOpen] = useState(false)
   const [lastReadTime, setLastReadTime] = useState(0)
-  const [refreshCount, setRefreshCount] = useState(0)
-  const [timelineKey, setTimelineKey] = useState<string | undefined>(undefined)
-  const [initialLoading, setInitialLoading] = useState(true)
-  const [storedEvents, setStoredEvents] = useState<NostrEvent[]>([])
-  const [events, setEvents] = useState<NostrEvent[]>([])
-  const [until, setUntil] = useState<number | undefined>(dayjs().unix())
-  const supportTouch = useMemo(() => isTouchDevice(), [])
+  const [filteredEvents, setFilteredEvents] = useState<NostrEvent[]>([])
+  const [initialLoading, setInitialLoading] = useState(notificationService.getInitialLoading())
+  const prefersTouch = useMemo(() => prefersTouchInteraction(), [])
   const topRef = useRef<HTMLDivElement | null>(null)
-  const filterKinds = useMemo(() => {
-    switch (notificationType) {
-      case 'mentions':
-        return [
-          kinds.ShortTextNote,
-          kinds.Highlights,
-          ExtendedKind.COMMENT,
-          ExtendedKind.VOICE_COMMENT,
-          ExtendedKind.POLL
-        ]
-      case 'reactions':
-        return [kinds.Reaction, kinds.Repost, kinds.GenericRepost, ExtendedKind.POLL_RESPONSE]
-      case 'zaps':
-        return [kinds.Zap]
-      default:
-        return [
-          kinds.ShortTextNote,
-          kinds.Repost,
-          kinds.GenericRepost,
-          kinds.Reaction,
-          kinds.Zap,
-          kinds.Highlights,
-          ExtendedKind.COMMENT,
-          ExtendedKind.POLL_RESPONSE,
-          ExtendedKind.VOICE_COMMENT,
-          ExtendedKind.POLL
-        ]
-    }
-  }, [notificationType])
-  useImperativeHandle(
-    ref,
-    () => ({
-      refresh: () => {
-        if (initialLoading) return
-        setRefreshCount((count) => count + 1)
-      }
-    }),
-    [initialLoading]
-  )
-
-  const handleNewEvent = useCallback(
-    (event: NostrEvent) => {
-      if (event.pubkey === pubkey) return
-      setEvents((oldEvents) => {
-        const index = oldEvents.findIndex((oldEvent) => compareEvents(oldEvent, event) <= 0)
-        if (index !== -1 && oldEvents[index].id === event.id) {
-          return oldEvents
-        }
-
-        stuffStatsService.updateStuffStatsByEvents([event])
-        if (index === -1) {
-          return [...oldEvents, event]
-        }
-        return [...oldEvents.slice(0, index), event, ...oldEvents.slice(index)]
-      })
-    },
-    [pubkey]
-  )
+  const selectedTab = visibleTabs.find((tab) => tab.id === notificationType) ?? visibleTabs[0]
 
   useEffect(() => {
-    if (current !== 'notifications') return
+    if (!visibleTabs.some((tab) => tab.id === notificationType)) {
+      setNotificationType(visibleTabs[0].id)
+    }
+  }, [notificationType, visibleTabs])
 
+  // Snapshot the page-level last-read marker only when this page becomes
+  // current. We deliberately don't react to subsequent changes of
+  // `notificationsSeenAt` (e.g. the global update fired on entering this
+  // page) — otherwise items would flip from unread to read mid-view.
+  const wasActiveRef = useRef(false)
+  useEffect(() => {
+    if (current !== 'notifications' || !pubkey) {
+      wasActiveRef.current = false
+      return
+    }
+    if (wasActiveRef.current) return
+    wasActiveRef.current = true
+    setLastReadTime(getNotificationsSeenAt())
+  }, [current, pubkey, getNotificationsSeenAt])
+
+  // Track service loading state.
+  useEffect(() => {
+    setInitialLoading(notificationService.getInitialLoading())
+    const unsub = notificationService.onLoadingChanged(setInitialLoading)
+    return unsub
+  }, [])
+
+  // Recompute filtered events whenever the underlying data or filter inputs change.
+  useEffect(() => {
     if (!pubkey) {
-      setUntil(undefined)
+      setFilteredEvents([])
       return
     }
 
-    const init = async () => {
-      setInitialLoading(true)
-      setStoredEvents([])
-      setEvents([])
-      setRefreshCount(SHOW_COUNT)
-      setLastReadTime(getNotificationsSeenAt())
+    let cancelled = false
+    const cache = new Map<string, boolean>()
 
-      const filter = {
-        '#p': [pubkey],
-        kinds: filterKinds,
-        limit: LIMIT
+    const recompute = async () => {
+      const events = notificationService.getEvents()
+      const seenIds = new Set<string>()
+      const passed: NostrEvent[] = []
+      for (const evt of events) {
+        if (seenIds.has(evt.id)) continue
+        seenIds.add(evt.id)
+        let ok = cache.get(evt.id)
+        if (ok === undefined) {
+          ok = await filterFn(evt)
+          if (cancelled) return
+          cache.set(evt.id, ok)
+        }
+        if (ok) passed.push(evt)
       }
-      const storedEvents = await client.getEventsFromIndexed(filter)
-      setStoredEvents(storedEvents)
-
-      const relayList = await client.fetchRelayList(pubkey)
-
-      const { closer, timelineKey } = await client.subscribeTimeline(
-        [
-          {
-            urls: relayList.read.length > 0 ? relayList.read.slice(0, 5) : getDefaultRelayUrls(),
-            filter
-          }
-        ],
-        {
-          onEvents: (events, eosed) => {
-            if (events.length > 0) {
-              setEvents(events)
-            }
-            if (eosed) {
-              setInitialLoading(false)
-              setUntil(events.length > 0 ? events[events.length - 1].created_at - 1 : undefined)
-              threadService.addRepliesToThread(events)
-              stuffStatsService.updateStuffStatsByEvents(events)
-            }
-          },
-          onNew: (event) => {
-            handleNewEvent(event)
-            threadService.addRepliesToThread([event])
-          }
-        },
-        { needSaveToDb: true }
-      )
-      setTimelineKey(timelineKey)
-      return closer
-    }
-
-    const promise = init()
-    return () => {
-      promise.then((closer) => closer?.())
-    }
-  }, [pubkey, refreshCount, filterKinds, current])
-
-  useEffect(() => {
-    if (!active || !pubkey) return
-
-    const handler = (data: Event) => {
-      const customEvent = data as CustomEvent<{ event: NostrEvent; relays: string[] }>
-      const { event } = customEvent.detail
-      if (
-        matchFilter(
-          {
-            kinds: filterKinds,
-            '#p': [pubkey]
-          },
-          event
-        )
-      ) {
-        handleNewEvent(event)
+      if (!cancelled) {
+        setFilteredEvents(passed)
       }
     }
 
-    client.addEventListener('newEvent', handler)
+    recompute()
+    const unsub = notificationService.onDataChanged(recompute)
     return () => {
-      client.removeEventListener('newEvent', handler)
+      cancelled = true
+      unsub()
     }
-  }, [pubkey, active, filterKinds, handleNewEvent])
+  }, [pubkey, filterFn])
 
   const handleLoadMore = useCallback(async () => {
-    if (!timelineKey || !until) return false
-    const newEvents = await client.loadMoreTimeline(timelineKey, until, LIMIT)
-    if (newEvents.length === 0) {
-      return false
-    }
-
-    setEvents((oldEvents) => [
-      ...oldEvents,
-      ...newEvents.filter((event) => event.pubkey !== pubkey)
-    ])
-    setUntil(newEvents[newEvents.length - 1].created_at - 1)
-    return true
-  }, [timelineKey, until, pubkey, setEvents, setUntil])
+    return notificationService.loadMore(LOAD_MORE_LIMIT)
+  }, [])
 
   const notifications = useMemo(() => {
-    const idSet = new Set<string>()
-    const filteredEvents = events.filter((evt) => {
-      if (evt.pubkey === pubkey) return false
-      if (idSet.has(evt.id)) return false
-      idSet.add(evt.id)
-      return true
+    const enabledFilters = new Set(selectedTab.filters)
+    return filteredEvents.filter((event) => {
+      const filter = getNotificationFilterType(event, pubkey)
+      return filter !== null && enabledFilters.has(filter)
     })
-    if (storedEvents.length === 0) return filteredEvents
-
-    const filteredStoredEvents = storedEvents.filter((evt) => evt.pubkey !== pubkey)
-    if (!initialLoading) {
-      return mergeTimelines([filteredEvents, filteredStoredEvents])
-    }
-
-    if (
-      !filteredEvents.length ||
-      storedEvents[0].created_at >= filteredEvents[filteredEvents.length - 1].created_at
-    ) {
-      return mergeTimelines([filteredEvents, filteredStoredEvents])
-    }
-    // Stored events are too old
-    return filteredEvents
-  }, [events, storedEvents, pubkey, initialLoading])
+  }, [filteredEvents, selectedTab, pubkey])
 
   const { visibleItems, shouldShowLoadingIndicator, bottomRef, setShowCount } = useInfiniteScroll({
     items: notifications,
@@ -244,27 +131,23 @@ const NotificationList = forwardRef((_, ref) => {
     initialLoading
   })
 
+  const groupedNotifications = useMemo(() => groupNotifications(visibleItems), [visibleItems])
+
   const refresh = () => {
     topRef.current?.scrollIntoView({ behavior: 'instant', block: 'start' })
     setTimeout(() => {
-      setRefreshCount((count) => count + 1)
+      notificationService.restart()
     }, 500)
   }
 
   const list = (
     <div>
-      {initialLoading && shouldShowLoadingIndicator && <LoadingBar />}
-      <div className={notificationListStyle === NOTIFICATION_LIST_STYLE.COMPACT ? 'mb-2' : ''} />
-      {visibleItems.map((notification) => (
-        <NotificationItem
-          key={notification.id}
-          notification={notification}
-          isNew={notification.created_at > lastReadTime}
-        />
+      {groupedNotifications.map((group) => (
+        <NotificationGroup key={group.key} group={group} lastReadTime={lastReadTime} />
       ))}
       <div ref={bottomRef} />
-      <div className="text-center text-sm text-muted-foreground">
-        {!!until || shouldShowLoadingIndicator ? (
+      <div className="text-muted-foreground text-center text-sm">
+        {notificationService.hasMore() || shouldShowLoadingIndicator ? (
           <NotificationSkeleton />
         ) : (
           t('no more notifications')
@@ -277,39 +160,124 @@ const NotificationList = forwardRef((_, ref) => {
     <div>
       <Tabs
         value={notificationType}
-        tabs={[
-          { value: 'all', label: 'All' },
-          { value: 'mentions', label: 'Mentions' },
-          { value: 'reactions', label: 'Reactions' },
-          { value: 'zaps', label: 'Zaps' }
-        ]}
+        tabs={visibleTabs.map((tab) => ({ value: tab.id, label: tab.label }))}
         onTabChange={(type) => {
           setShowCount(SHOW_COUNT)
-          setNotificationType(type as TNotificationType)
+          setNotificationType(type as typeof notificationType)
+          topRef.current?.scrollIntoView({ behavior: 'instant', block: 'start' })
         }}
+        onCustomize={() => setCustomizeOpen(true)}
         options={
           <>
-            {!supportTouch ? <RefreshButton onClick={() => refresh()} /> : null}
+            {!prefersTouch ? <RefreshButton onClick={() => refresh()} /> : null}
             <TrustScoreFilter filterId={SPECIAL_TRUST_SCORE_FILTER_ID.NOTIFICATIONS} />
           </>
         }
       />
-      <div ref={topRef} className="scroll-mt-[calc(6rem+1px)]" />
-      {supportTouch ? (
-        <PullToRefresh
-          onRefresh={async () => {
-            refresh()
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-          }}
-          pullingContent=""
-        >
-          {list}
-        </PullToRefresh>
-      ) : (
-        list
-      )}
+      <div ref={topRef} className="scroll-mt-24.25" />
+      {initialLoading && shouldShowLoadingIndicator && <LoadingBar />}
+      <PullToRefresh
+        onRefresh={async () => {
+          refresh()
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }}
+      >
+        {list}
+      </PullToRefresh>
+      <NotificationTabsCustomizeDialog open={customizeOpen} onOpenChange={setCustomizeOpen} />
     </div>
   )
-})
-NotificationList.displayName = 'NotificationList'
-export default NotificationList
+}
+
+type TNotificationGroupKey = 'today' | 'week' | 'month' | 'earlier'
+
+const GROUP_LABELS: Record<TNotificationGroupKey, string> = {
+  today: 'Today',
+  week: 'This week',
+  month: 'This month',
+  earlier: 'Earlier'
+}
+
+function groupNotifications(events: NostrEvent[]) {
+  const now = dayjs()
+  const todayStart = now.startOf('day').unix()
+  const weekStart = now.startOf('week').unix()
+  const monthStart = now.startOf('month').unix()
+
+  const groups: { key: TNotificationGroupKey; label: string; items: NostrEvent[] }[] = []
+  let current: { key: TNotificationGroupKey; label: string; items: NostrEvent[] } | null = null
+
+  for (const evt of events) {
+    let key: TNotificationGroupKey
+    if (evt.created_at >= todayStart) key = 'today'
+    else if (evt.created_at >= weekStart) key = 'week'
+    else if (evt.created_at >= monthStart) key = 'month'
+    else key = 'earlier'
+
+    if (!current || current.key !== key) {
+      current = { key, label: GROUP_LABELS[key], items: [] }
+      groups.push(current)
+    }
+    current.items.push(evt)
+  }
+  return groups
+}
+
+type TNotificationGroup = ReturnType<typeof groupNotifications>[number]
+
+function NotificationGroup({
+  group,
+  lastReadTime
+}: {
+  group: TNotificationGroup
+  lastReadTime: number
+}) {
+  const [visibleNotificationIds, setVisibleNotificationIds] = useState<Set<string>>(() => new Set())
+
+  const handleVisibilityChange = useCallback((notificationId: string, isVisible: boolean) => {
+    setVisibleNotificationIds((previousIds) => {
+      const wasVisible = previousIds.has(notificationId)
+      if (wasVisible === isVisible) return previousIds
+
+      const nextIds = new Set(previousIds)
+      if (isVisible) {
+        nextIds.add(notificationId)
+      } else {
+        nextIds.delete(notificationId)
+      }
+      return nextIds
+    })
+  }, [])
+
+  const hasVisibleNotification = group.items.some(({ id }) => visibleNotificationIds.has(id))
+
+  return (
+    <>
+      {hasVisibleNotification && <NotificationGroupHeader label={group.label} />}
+      {group.items.map((notification) => (
+        <NotificationItem
+          key={notification.id}
+          notification={notification}
+          isNew={notification.created_at > lastReadTime}
+          onVisibilityChange={(isVisible) => handleVisibilityChange(notification.id, isVisible)}
+        />
+      ))}
+    </>
+  )
+}
+
+function NotificationGroupHeader({ label }: { label: string }) {
+  const { t } = useTranslation()
+  const { deepBrowsing } = useDeepBrowsing()
+
+  return (
+    <div
+      className={cn(
+        'bg-border text-muted-foreground sticky z-20 border-b px-4 py-1 text-sm font-semibold backdrop-blur-md transition-[top] duration-300',
+        deepBrowsing ? 'top-12' : 'top-24.25'
+      )}
+    >
+      {t(label)}
+    </div>
+  )
+}

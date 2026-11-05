@@ -1,5 +1,7 @@
-import { createContext, useContext, useMemo } from 'react'
+import { getScreenSize, observeScreenSize } from '@/lib/responsive-screen'
+import { createContext, useContext, useEffect, useState } from 'react'
 
+/** Responsive layout breakpoints only; do not use these as OS or input-mode checks. */
 type TScreenSizeContext = {
   isSmallScreen: boolean
   isLargeScreen: boolean
@@ -16,17 +18,20 @@ export const useScreenSize = () => {
 }
 
 export function ScreenSizeProvider({ children }: { children: React.ReactNode }) {
-  const isSmallScreen = useMemo(() => window.innerWidth <= 768, [])
-  const isLargeScreen = useMemo(() => window.innerWidth >= 1280, [])
+  const [size, setSize] = useState(getScreenSize)
 
-  return (
-    <ScreenSizeContext.Provider
-      value={{
-        isSmallScreen,
-        isLargeScreen
-      }}
-    >
-      {children}
-    </ScreenSizeContext.Provider>
+  useEffect(
+    () =>
+      observeScreenSize((next) => {
+        setSize((previous) =>
+          previous.isSmallScreen === next.isSmallScreen &&
+          previous.isLargeScreen === next.isLargeScreen
+            ? previous
+            : next
+        )
+      }),
+    []
   )
+
+  return <ScreenSizeContext.Provider value={size}>{children}</ScreenSizeContext.Provider>
 }

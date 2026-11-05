@@ -1,17 +1,50 @@
+import { isInsecureUrl } from '@/lib/url'
+import { useUserPreferences } from '@/providers/UserPreferencesProvider'
+import webService from '@/services/web.service'
 import { TWebMetadata } from '@/types'
 import { useEffect, useState } from 'react'
-import webService from '@/services/web.service'
 
-export function useFetchWebMetadata(url: string) {
-  const [metadata, setMetadata] = useState<TWebMetadata>({})
-  const proxyServer = import.meta.env.VITE_PROXY_SERVER
-  if (proxyServer) {
-    url = `${proxyServer}/sites/${encodeURIComponent(url)}`
-  }
+type WebMetadataState = {
+  url: string
+  metadata: TWebMetadata
+  isLoading: boolean
+}
+
+export function useFetchWebMetadata(url: string, enabled = true) {
+  const { allowInsecureConnection } = useUserPreferences()
+  const [state, setState] = useState<WebMetadataState>({
+    url: '',
+    metadata: {},
+    isLoading: false
+  })
 
   useEffect(() => {
-    webService.fetchWebMetadata(url).then((metadata) => setMetadata(metadata))
-  }, [url])
+    if (!enabled || (!allowInsecureConnection && isInsecureUrl(url))) return
 
-  return metadata
+    let ignore = false
+    setState({ url, metadata: {}, isLoading: true })
+
+    webService
+      .fetchWebMetadata(url)
+      .then((metadata) => {
+        if (!ignore) setState({ url, metadata, isLoading: false })
+      })
+      .catch(() => {
+        if (!ignore) setState({ url, metadata: {}, isLoading: false })
+      })
+
+    return () => {
+      ignore = true
+    }
+  }, [url, enabled, allowInsecureConnection])
+
+  if (!enabled) {
+    return { metadata: {}, isLoading: false }
+  }
+
+  if (state.url !== url) {
+    return { metadata: {}, isLoading: true }
+  }
+
+  return { metadata: state.metadata, isLoading: state.isLoading }
 }

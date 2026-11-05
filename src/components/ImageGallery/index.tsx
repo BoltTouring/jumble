@@ -1,3 +1,4 @@
+import { useImageSave } from '@/hooks/useImageSave'
 import { randomString } from '@/lib/random'
 import { cn } from '@/lib/utils'
 import { useContentPolicy } from '@/providers/ContentPolicyProvider'
@@ -6,28 +7,39 @@ import modalManager from '@/services/modal-manager.service'
 import { TImetaInfo } from '@/types'
 import { ReactNode, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import Lightbox from 'yet-another-react-lightbox'
+import { useTranslation } from 'react-i18next'
+import type { SlideImage } from 'yet-another-react-lightbox'
+import Download from 'yet-another-react-lightbox/plugins/download'
 import Zoom from 'yet-another-react-lightbox/plugins/zoom'
 import Image from '../Image'
-import ImageWithLightbox from '../ImageWithLightbox'
+import Lightbox from '../Lightbox'
+import ImageStrip from './ImageStrip'
 
 export default function ImageGallery({
   className,
   images,
   start = 0,
   end = images.length,
-  mustLoad = false
+  mustLoad = false,
+  enableLightbox = true
 }: {
   className?: string
   images: TImetaInfo[]
   start?: number
   end?: number
   mustLoad?: boolean
+  enableLightbox?: boolean
 }) {
   const id = useMemo(() => `image-gallery-${randomString()}`, [])
+  const { t } = useTranslation()
   const { autoLoadMedia } = useContentPolicy()
   const [index, setIndex] = useState(-1)
-  const [slides, setSlides] = useState<{ src: string }[]>(images.map(({ url }) => ({ src: url })))
+  const [revealed, setRevealed] = useState(false)
+  const shouldLoad = mustLoad || autoLoadMedia || revealed
+  const [slides, setSlides] = useState<SlideImage[]>(
+    images.map(({ url, dim }) => ({ src: url, ...dim }))
+  )
+  const saveLightboxImage = useImageSave(slides[index]?.src, index >= 0)
   useEffect(() => {
     if (index >= 0) {
       modalManager.register(id, () => {
@@ -39,23 +51,29 @@ export default function ImageGallery({
   }, [index])
 
   useEffect(() => {
+    if (!shouldLoad) return
+    let cancelled = false
     const loadImages = async () => {
       const slides = await Promise.all(
-        images.map(({ url, pubkey }) => {
-          return new Promise<{ src: string }>((resolve) => {
+        images.map(({ url, pubkey, dim }) => {
+          return new Promise<SlideImage>((resolve) => {
             const img = new window.Image()
             let validUrl = url
             img.onload = () => {
               blossomService.markAsSuccess(url, validUrl)
-              resolve({ src: validUrl })
+              resolve({
+                src: validUrl,
+                width: dim?.width ?? img.naturalWidth,
+                height: dim?.height ?? img.naturalHeight
+              })
             }
             img.onerror = () => {
               blossomService.tryNextUrl(url).then((nextUrl) => {
                 if (nextUrl) {
                   validUrl = nextUrl
-                  resolve({ src: validUrl })
+                  resolve({ src: validUrl, ...dim })
                 } else {
-                  resolve({ src: url })
+                  resolve({ src: url, ...dim })
                 }
               })
             }
@@ -67,7 +85,7 @@ export default function ImageGallery({
                   img.src = validUrl
                 })
                 .catch(() => {
-                  resolve({ src: url })
+                  resolve({ src: url, ...dim })
                 })
             } else {
               img.src = url
@@ -75,31 +93,32 @@ export default function ImageGallery({
           })
         })
       )
-      setSlides(slides)
+      if (!cancelled) setSlides(slides)
     }
 
     loadImages()
-  }, [images])
+    return () => {
+      cancelled = true
+    }
+  }, [images, shouldLoad])
 
   const handlePhotoClick = (event: React.MouseEvent, current: number) => {
-    event.stopPropagation()
     event.preventDefault()
-    setIndex(start + current)
+    if (enableLightbox) setIndex(start + current)
   }
 
   const displayImages = images.slice(start, end)
 
-  if (!mustLoad && !autoLoadMedia) {
-    return displayImages.map((image, i) => (
-      <ImageWithLightbox
-        key={i}
-        image={image}
-        className="max-h-[80vh] object-contain sm:max-h-[50vh]"
-        classNames={{
-          wrapper: cn('w-fit max-w-full border', className)
-        }}
-      />
-    ))
+  if (!shouldLoad) {
+    return (
+      <button
+        type="button"
+        className={cn('text-primary w-fit cursor-pointer truncate hover:underline', className)}
+        onClick={() => setRevealed(true)}
+      >
+        [{t('Click to load image')}]
+      </button>
+    )
   }
 
   let imageContent: ReactNode | null = null
@@ -110,52 +129,48 @@ export default function ImageGallery({
         className="max-h-[80vh] object-contain sm:max-h-[50vh]"
         classNames={{
           errorPlaceholder: 'aspect-square h-[30vh]',
-          wrapper: 'cursor-zoom-in border'
+          wrapper: cn('w-fit max-w-full border', enableLightbox && 'cursor-zoom-in')
         }}
         image={displayImages[0]}
+        upscaleSmall
+        fillNearRow
+        role={enableLightbox ? 'button' : undefined}
+        tabIndex={enableLightbox ? 0 : undefined}
+        aria-label={enableLightbox ? t('Open image') : undefined}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            event.currentTarget.click()
+          }
+        }}
         onClick={(e) => handlePhotoClick(e, 0)}
       />
     )
-  } else if (displayImages.length === 2 || displayImages.length === 4) {
+  } else if (displayImages.length > 1) {
     imageContent = (
-      <div className="grid w-full grid-cols-2 gap-2">
-        {displayImages.map((image, i) => (
-          <Image
-            key={i}
-            className="aspect-square w-full"
-            classNames={{ wrapper: 'cursor-zoom-in border' }}
-            image={image}
-            onClick={(e) => handlePhotoClick(e, i)}
-          />
-        ))}
-      </div>
-    )
-  } else {
-    imageContent = (
-      <div className="grid w-full grid-cols-3 gap-2">
-        {displayImages.map((image, i) => (
-          <Image
-            key={i}
-            className="aspect-square w-full"
-            classNames={{ wrapper: 'cursor-zoom-in border' }}
-            image={image}
-            onClick={(e) => handlePhotoClick(e, i)}
-          />
-        ))}
-      </div>
+      <ImageStrip
+        images={displayImages}
+        onPhotoClick={enableLightbox ? handlePhotoClick : undefined}
+      />
     )
   }
 
   return (
-    <div className={cn(displayImages.length === 1 ? 'w-fit max-w-full' : 'w-full', className)}>
+    <div className={cn('w-full', className)}>
       {imageContent}
       {index >= 0 &&
         createPortal(
           <div onClick={(e) => e.stopPropagation()}>
             <Lightbox
+              upscaleSmall
               index={index}
               slides={slides}
-              plugins={[Zoom]}
+              plugins={[Download, Zoom]}
+              labels={{ Download: t('Save') }}
+              download={{
+                download: ({ saveAs }) => saveLightboxImage(saveAs)
+              }}
+              on={{ view: ({ index }) => setIndex(index) }}
               open={index >= 0}
               close={() => setIndex(-1)}
               controller={{

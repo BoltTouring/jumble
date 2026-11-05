@@ -1,16 +1,24 @@
-import { ExtendedKind, SPECIAL_TRUST_SCORE_FILTER_ID } from '@/constants'
-import { compareEvents } from '@/lib/event'
-import { notificationFilter } from '@/lib/notification'
-import { getDefaultRelayUrls } from '@/lib/relay'
-import { usePrimaryPage } from '@/PageManager'
+import { NotificationProcessor } from '@/lib/notification-processor'
+import { useNativeRelayNotifications } from '@/hooks/useNativeRelayNotifications'
+import { isAndroid } from '@/lib/platform'
+import { useDmUnread } from '@/hooks/useDmUnread'
+import { useNotificationFilter } from '@/hooks/useNotificationFilter'
+import { getEventAuthorPubkey } from '@/lib/event'
+import { toDmConversation } from '@/lib/link'
+import { getNotificationFilterType } from '@/lib/notification'
+import { usePrimaryPage, useSecondaryPage } from '@/PageManager'
 import client from '@/services/client.service'
+import dmService from '@/services/dm.service'
+import notificationService from '@/services/notification.service'
 import storage from '@/services/local-storage.service'
-import { kinds, NostrEvent } from 'nostr-tools'
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { useContentPolicy } from './ContentPolicyProvider'
-import { useMuteList } from './MuteListProvider'
+import systemNotification from '@/services/system-notification'
+import { TNotificationFilter } from '@/types'
+import { TFunction } from 'i18next'
+import { NostrEvent } from 'nostr-tools'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useNostr } from './NostrProvider'
-import { useUserTrust } from './UserTrustProvider'
+import { useUserPreferences } from './UserPreferencesProvider'
 
 type TNotificationContext = {
   hasNewNotification: boolean
@@ -20,6 +28,32 @@ type TNotificationContext = {
 }
 
 const NotificationContext = createContext<TNotificationContext | undefined>(undefined)
+const SYSTEM_NOTIFICATION_TARGET = '/?page=notifications'
+
+function isAppInForeground(): boolean {
+  return document.visibilityState === 'visible' && document.hasFocus()
+}
+
+function getSystemNotificationDescription(type: TNotificationFilter, t: TFunction): string {
+  switch (type) {
+    case 'likes':
+      return t('reacted to your note')
+    case 'reposts':
+      return t('reposted your note')
+    case 'zaps':
+      return t('zapped you')
+    case 'highlights':
+      return t('highlighted your note')
+    case 'pollResponses':
+      return t('voted in your poll')
+    case 'mentions':
+      return t('mentioned you in a note')
+    case 'replies':
+      return t('replied to your note')
+    case 'quotes':
+      return t('quoted your note')
+  }
+}
 
 export const useNotification = () => {
   const context = useContext(NotificationContext)
@@ -30,131 +64,223 @@ export const useNotification = () => {
 }
 
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
-  const { current } = usePrimaryPage()
+  const { t } = useTranslation()
+  const { current, navigate } = usePrimaryPage()
+  const { push } = useSecondaryPage()
   const active = useMemo(() => current === 'notifications', [current])
   const { pubkey, notificationsSeenAt, updateNotificationsSeenAt } = useNostr()
-  const { mutePubkeySet } = useMuteList()
-  const { getMinTrustScore, meetsMinTrustScore } = useUserTrust()
-  const { hideContentMentioningMutedUsers } = useContentPolicy()
-  const [newNotifications, setNewNotifications] = useState<NostrEvent[]>([])
+  const { notificationTabs, enableDm } = useUserPreferences()
+  const filterFn = useNotificationFilter()
+  const unreadNotificationFilter = useMemo(() => {
+    const firstVisibleTab = notificationTabs.find((tab) => !tab.hidden)
+    return new Set(firstVisibleTab?.filters ?? [])
+  }, [notificationTabs])
+  const nativeDescriptions = useMemo(
+    () =>
+      Object.fromEntries(
+        [
+          'likes',
+          'reposts',
+          'zaps',
+          'highlights',
+          'pollResponses',
+          'mentions',
+          'replies',
+          'quotes'
+        ].map((type) => [type, getSystemNotificationDescription(type as TNotificationFilter, t)])
+      ),
+    [t]
+  )
+  useNativeRelayNotifications(pubkey, unreadNotificationFilter, nativeDescriptions)
   const [readNotificationIdSet, setReadNotificationIdSet] = useState<Set<string>>(new Set())
   const [filteredNewNotifications, setFilteredNewNotifications] = useState<NostrEvent[]>([])
+  const { unreadCount: dmUnreadCount, shouldIncludeConversation } = useDmUnread()
+  const wasActiveRef = useRef(false)
+  const notifiedDmMessageIdsRef = useRef(new Set<string>())
 
   useEffect(() => {
-    if (active || notificationsSeenAt < 0) {
+    if (!pubkey) {
+      notificationService.stop()
+      setReadNotificationIdSet(new Set())
+      return
+    }
+    notificationService.start(pubkey)
+    setReadNotificationIdSet(new Set())
+    return () => {
+      // keep the subscription alive for the session; only stop on logout (handled above)
+    }
+  }, [pubkey])
+
+  useEffect(
+    () =>
+      systemNotification.onClick((target) => {
+        if (target === SYSTEM_NOTIFICATION_TARGET) {
+          navigate('notifications')
+        } else if (target?.startsWith('/dms/')) {
+          navigate('dms')
+          push(target)
+        }
+      }),
+    [navigate, push]
+  )
+
+  useEffect(() => {
+    notifiedDmMessageIdsRef.current.clear()
+  }, [pubkey])
+
+  useEffect(() => {
+    if (!enableDm) return
+    let cancelled = false
+    const unsubscribe = dmService.onNewMessage((message) => {
+      const dispatch = async () => {
+        if (!pubkey || message.senderPubkey === pubkey) return
+
+        const notifiedIds = notifiedDmMessageIdsRef.current
+        if (notifiedIds.has(message.id)) return
+        notifiedIds.add(message.id)
+        if (notifiedIds.size > 1_000) {
+          const oldestId = notifiedIds.values().next().value
+          if (oldestId) notifiedIds.delete(oldestId)
+        }
+
+        if (
+          !storage.getSystemNotificationsEnabled() ||
+          !storage.getSystemDmNotificationsEnabled() ||
+          isAppInForeground()
+        ) {
+          return
+        }
+
+        const conversation = await dmService.getConversation(pubkey, message.senderPubkey)
+        if (cancelled || !conversation) return
+        if (!(await shouldIncludeConversation(conversation)) || cancelled) return
+
+        const profile = await client.fetchProfile(message.senderPubkey)
+        if (
+          cancelled ||
+          !storage.getSystemNotificationsEnabled() ||
+          !storage.getSystemDmNotificationsEnabled() ||
+          isAppInForeground()
+        ) {
+          return
+        }
+
+        await systemNotification.show({
+          id: `dm-${message.id}`,
+          title: 'Jumble',
+          body: `${profile?.username ?? message.senderPubkey.slice(0, 8)} ${t('sent you a private message')}`,
+          target: toDmConversation(message.senderPubkey)
+        })
+      }
+      void dispatch().catch(() => undefined)
+    })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [enableDm, pubkey, shouldIncludeConversation, t])
+
+  useEffect(() => {
+    let cancelled = false
+
+    // Both runtimes use the same public-notification processor; adapters differ only in delivery.
+    if (isAndroid() || !pubkey) return
+    const canNotify = () =>
+      storage.getSystemNotificationsEnabled() &&
+      (!enableDm || storage.getSystemGeneralNotificationsEnabled()) &&
+      !isAppInForeground()
+    const processor = new NotificationProcessor({
+      pubkey,
+      filters: unreadNotificationFilter,
+      filter: filterFn,
+      canNotify,
+      notify: async (event, type) => {
+        const author = getEventAuthorPubkey(event)
+        const profile = await client.fetchProfile(author)
+        if (cancelled || !canNotify()) return
+        await systemNotification.show({
+          id: event.id,
+          title: 'Jumble',
+          body: `${profile?.username ?? author.slice(0, 8)} ${getSystemNotificationDescription(type, t)}`,
+          target: SYSTEM_NOTIFICATION_TARGET
+        })
+      }
+    })
+    const unsubscribe = notificationService.onNewEvent((event) => {
+      if (canNotify()) void processor.process(event).catch(() => undefined)
+    })
+    return () => {
+      cancelled = true
+      processor.stop()
+      unsubscribe()
+    }
+  }, [enableDm, pubkey, filterFn, unreadNotificationFilter, t])
+
+  useEffect(() => {
+    if (active) {
+      if (wasActiveRef.current) return
+      wasActiveRef.current = true
+      // Update the global seen-at on entry so closing the tab while still
+      // on this page doesn't lose the read state. The page snapshots its
+      // own lastReadTime before this fires, so the in-view bold styling is
+      // unaffected.
+      updateNotificationsSeenAt()
+      return
+    }
+    if (wasActiveRef.current) {
+      wasActiveRef.current = false
+      // Re-update on leave so notifications that arrived during the visit
+      // aren't shown as "new" again on the next visit.
+      updateNotificationsSeenAt()
+      setReadNotificationIdSet(new Set())
+    }
+  }, [active])
+
+  useEffect(() => {
+    if (active || notificationsSeenAt < 0 || !pubkey) {
       setFilteredNewNotifications([])
       return
     }
-    const filterNotifications = async () => {
+
+    let cancelled = false
+    const recompute = async () => {
+      const events = notificationService.getEvents()
       const filtered: NostrEvent[] = []
-      const trustScoreThreshold = getMinTrustScore(SPECIAL_TRUST_SCORE_FILTER_ID.NOTIFICATIONS)
       await Promise.allSettled(
-        newNotifications.map(async (notification) => {
+        events.map(async (notification) => {
           if (notification.created_at <= notificationsSeenAt || filtered.length >= 10) {
             return
           }
-          if (
-            !(await notificationFilter(notification, {
-              pubkey,
-              mutePubkeySet,
-              hideContentMentioningMutedUsers,
-              meetsMinTrustScore: async (pubkey: string) => {
-                if (trustScoreThreshold === 0) return true
-                return meetsMinTrustScore(pubkey, trustScoreThreshold)
-              }
-            }))
-          ) {
+          if (!(await filterFn(notification))) {
+            return
+          }
+          const notificationType = getNotificationFilterType(notification, pubkey)
+          if (notificationType === null || !unreadNotificationFilter.has(notificationType)) {
             return
           }
           filtered.push(notification)
         })
       )
-      setFilteredNewNotifications(filtered)
-    }
-    filterNotifications()
-  }, [
-    newNotifications,
-    notificationsSeenAt,
-    mutePubkeySet,
-    hideContentMentioningMutedUsers,
-    meetsMinTrustScore
-  ])
-
-  useEffect(() => {
-    setNewNotifications([])
-    updateNotificationsSeenAt(!active)
-  }, [active])
-
-  useEffect(() => {
-    if (!pubkey) return
-
-    setNewNotifications([])
-    setReadNotificationIdSet(new Set())
-
-    const subscribe = async () => {
-      let eosed = false
-      const relayList = await client.fetchRelayList(pubkey)
-      const relays = relayList.read.length > 0 ? relayList.read.slice(0, 5) : getDefaultRelayUrls()
-      return client.subscribe(
-        relays,
-        [
-          {
-            kinds: [
-              kinds.ShortTextNote,
-              kinds.Repost,
-              kinds.GenericRepost,
-              kinds.Reaction,
-              kinds.Zap,
-              kinds.Highlights,
-              ExtendedKind.COMMENT,
-              ExtendedKind.POLL_RESPONSE,
-              ExtendedKind.VOICE_COMMENT,
-              ExtendedKind.POLL
-            ],
-            '#p': [pubkey],
-            limit: 20
-          }
-        ],
-        {
-          oneose: (e) => {
-            if (e) {
-              eosed = e
-              setNewNotifications((prev) => {
-                return [...prev.sort((a, b) => compareEvents(b, a))]
-              })
-            }
-          },
-          onevent: (evt) => {
-            if (evt.pubkey !== pubkey) {
-              setNewNotifications((prev) => {
-                if (!eosed) {
-                  return [evt, ...prev]
-                }
-                if (prev.length && compareEvents(prev[0], evt) >= 0) {
-                  return prev
-                }
-
-                client.emitNewEvent(evt, relays)
-                return [evt, ...prev]
-              })
-            }
-          }
-        }
-      )
+      if (!cancelled) {
+        setFilteredNewNotifications(filtered)
+      }
     }
 
-    const promise = subscribe()
+    recompute()
+    const unsub = notificationService.onDataChanged(recompute)
     return () => {
-      promise.then((closer) => closer.close())
+      cancelled = true
+      unsub()
     }
-  }, [pubkey])
+  }, [active, notificationsSeenAt, pubkey, filterFn, unreadNotificationFilter])
 
   useEffect(() => {
-    const newNotificationCount = filteredNewNotifications.length
+    const totalBadgeCount = filteredNewNotifications.length + dmUnreadCount
 
     // Update title
-    if (newNotificationCount > 0) {
-      document.title = `(${newNotificationCount >= 10 ? '9+' : newNotificationCount}) Jumble`
+    if (totalBadgeCount > 0) {
+      document.title = `(${totalBadgeCount >= 10 ? '9+' : totalBadgeCount}) Jumble`
     } else {
       document.title = 'Jumble'
     }
@@ -163,7 +289,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     const favicons = document.querySelectorAll<HTMLLinkElement>("link[rel*='icon']")
     if (!favicons.length) return
 
-    if (newNotificationCount === 0) {
+    if (totalBadgeCount === 0) {
       favicons.forEach((favicon) => {
         favicon.href = '/favicon.ico'
       })
@@ -188,9 +314,9 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         })
       }
     }
-  }, [filteredNewNotifications])
+  }, [filteredNewNotifications, dmUnreadCount])
 
-  const getNotificationsSeenAt = () => {
+  const getNotificationsSeenAt = useCallback(() => {
     if (notificationsSeenAt >= 0) {
       return notificationsSeenAt
     }
@@ -198,15 +324,18 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       return storage.getLastReadNotificationTime(pubkey)
     }
     return 0
-  }
+  }, [notificationsSeenAt, pubkey])
 
-  const isNotificationRead = (notificationId: string): boolean => {
-    return readNotificationIdSet.has(notificationId)
-  }
+  const isNotificationRead = useCallback(
+    (notificationId: string): boolean => {
+      return readNotificationIdSet.has(notificationId)
+    },
+    [readNotificationIdSet]
+  )
 
-  const markNotificationAsRead = (notificationId: string): void => {
+  const markNotificationAsRead = useCallback((notificationId: string): void => {
     setReadNotificationIdSet((prev) => new Set([...prev, notificationId]))
-  }
+  }, [])
 
   return (
     <NotificationContext.Provider

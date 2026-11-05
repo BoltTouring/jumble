@@ -1,5 +1,6 @@
 import Icon from '@/assets/Icon'
 import Logo from '@/assets/Logo'
+import { SidebarSignerApprovalIndicator } from '@/components/SignerApprovalIndicator'
 import { IS_COMMUNITY_MODE } from '@/constants'
 import { cn } from '@/lib/utils'
 import { usePrimaryPage } from '@/PageManager'
@@ -10,20 +11,23 @@ import { useUserPreferences } from '@/providers/UserPreferencesProvider'
 import { ChevronsLeft, ChevronsRight } from 'lucide-react'
 import AccountButton from './AccountButton'
 import BookmarkButton from './BookmarkButton'
-import RelaysButton from './ExploreButton'
+import DesktopAppTip from './DesktopAppTip'
 import FollowingButton from './FollowingButton'
 import HomeButton from './HomeButton'
 import LayoutSwitcher from './LayoutSwitcher'
+import MessagesButton from './MessagesButton'
 import NotificationsButton from './NotificationButton'
 import PostButton from './PostButton'
 import ProfileButton from './ProfileButton'
 import SearchButton from './SearchButton'
 import SettingsButton from './SettingsButton'
+import UpdateButton from './UpdateButton'
 
 export default function PrimaryPageSidebar() {
   const { isSmallScreen } = useScreenSize()
   const { themeSetting } = useTheme()
-  const { sidebarCollapse, updateSidebarCollapse, enableSingleColumnLayout } = useUserPreferences()
+  const { sidebarCollapse, updateSidebarCollapse, enableSingleColumnLayout, enableDm } =
+    useUserPreferences()
   const { pubkey } = useNostr()
   const { navigate } = usePrimaryPage()
 
@@ -32,18 +36,18 @@ export default function PrimaryPageSidebar() {
   return (
     <div
       className={cn(
-        'relative flex h-full shrink-0 flex-col justify-between pb-2 pt-3',
+        'relative flex h-full min-h-0 shrink-0 flex-col justify-between gap-4 overflow-x-hidden overflow-y-auto overscroll-contain pt-3 pb-2',
         sidebarCollapse ? 'w-16 px-2' : 'w-52 px-4'
       )}
     >
-      <div className="space-y-2">
+      <div className="flex shrink-0 flex-col gap-2">
         {sidebarCollapse ? (
           <button
-            className="mb-4 w-full cursor-pointer px-3 py-1 transition-opacity hover:opacity-80"
+            className="mb-4 flex h-12 w-full cursor-pointer items-center justify-center transition-opacity hover:opacity-80"
             onClick={() => navigate('home')}
             aria-label="Go to home"
           >
-            <Icon />
+            <Icon className="size-6" />
           </button>
         ) : (
           <button
@@ -55,32 +59,37 @@ export default function PrimaryPageSidebar() {
           </button>
         )}
         <HomeButton collapse={sidebarCollapse} />
-        {!IS_COMMUNITY_MODE && <RelaysButton collapse={sidebarCollapse} />}
         {IS_COMMUNITY_MODE && <FollowingButton collapse={sidebarCollapse} />}
         <NotificationsButton collapse={sidebarCollapse} />
+        {enableDm && <MessagesButton collapse={sidebarCollapse} />}
         <SearchButton collapse={sidebarCollapse} />
         <ProfileButton collapse={sidebarCollapse} />
         {pubkey && <BookmarkButton collapse={sidebarCollapse} />}
         <SettingsButton collapse={sidebarCollapse} />
         <PostButton collapse={sidebarCollapse} />
       </div>
-      <div className="space-y-4">
+      <div className="flex shrink-0 flex-col gap-4">
+        <SidebarSignerApprovalIndicator collapsed={sidebarCollapse} />
+        <UpdateButton collapse={sidebarCollapse} />
+        <DesktopAppTip collapse={sidebarCollapse} />
         <LayoutSwitcher collapse={sidebarCollapse} />
         <AccountButton collapse={sidebarCollapse} />
       </div>
       <button
         className={cn(
-          'absolute flex h-6 w-5 flex-col items-center justify-center rounded-l-md p-0 text-muted-foreground transition-colors hover:bg-background hover:text-foreground hover:shadow-md [&_svg]:size-4',
-          themeSetting === 'pure-black' || enableSingleColumnLayout
-            ? 'right-0 top-3'
-            : '-right-0.5 top-5'
+          'text-muted-foreground hover:bg-background hover:text-foreground absolute end-0 flex h-6 w-5 flex-col items-center justify-center rounded-s-md p-0 transition-colors hover:shadow-md [&_svg]:size-4',
+          themeSetting === 'pure-black' || enableSingleColumnLayout ? 'top-3' : 'top-5'
         )}
         onClick={(e) => {
           e.stopPropagation()
           updateSidebarCollapse(!sidebarCollapse)
         }}
       >
-        {sidebarCollapse ? <ChevronsRight /> : <ChevronsLeft />}
+        {sidebarCollapse ? (
+          <ChevronsRight className="rtl:-scale-x-100" />
+        ) : (
+          <ChevronsLeft className="rtl:-scale-x-100" />
+        )}
       </button>
     </div>
   )

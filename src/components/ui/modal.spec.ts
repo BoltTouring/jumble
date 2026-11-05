@@ -1,0 +1,665 @@
+// @vitest-environment jsdom
+
+import DialogHost from '@/components/DialogHost'
+import dialogService from '@/services/dialog.service'
+import ResponsiveDialog from '@/components/ResponsiveDialog'
+import { act, createElement, useEffect, useState } from 'react'
+import { createRoot, Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogTitle
+} from './alert-dialog'
+import { Dialog, DialogContent, DialogTitle, DialogTrigger } from './dialog'
+import { Modal, ModalContent, ModalDescription } from './modal'
+
+const screen = vi.hoisted(() => ({ small: false }))
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
+vi.mock('@/providers/ScreenSizeProvider', () => ({
+  useScreenSize: () => ({ isSmallScreen: screen.small })
+}))
+
+let root: Root
+let container: HTMLDivElement
+beforeEach(() => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  screen.small = false
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+})
+afterEach(async () => {
+  await act(async () => root.unmount())
+  container.remove()
+  vi.unstubAllGlobals()
+})
+
+function StatefulBody({ mounted }: { mounted: () => void }) {
+  const [value, setValue] = useState(0)
+  useEffect(mounted, [mounted])
+  return createElement(
+    'section',
+    null,
+    createElement(ModalDescription, null, 'Stateful content'),
+    createElement('button', { onClick: () => setValue(value + 1) }, `Count ${value}`)
+  )
+}
+
+describe('responsive modals', () => {
+  it.each(['dialog', 'modal', 'responsive-dialog'] as const)(
+    'keeps %s content mounted and state intact when switching presentation',
+    async (kind) => {
+      const mounted = vi.fn()
+      const render = async () =>
+        act(async () => {
+          const body = createElement(StatefulBody, { mounted })
+          root.render(
+            kind === 'responsive-dialog'
+              ? createElement(ResponsiveDialog, {
+                  open: true,
+                  onOpenChange: vi.fn(),
+                  children: body
+                })
+              : kind === 'dialog'
+                ? createElement(Dialog, { open: true }, createElement(DialogContent, null, body))
+                : createElement(Modal, { open: true }, createElement(ModalContent, null, body))
+          )
+        })
+      await render()
+      const surface = document.querySelector('[role="dialog"]')!
+      const body = surface.querySelector<HTMLElement>('[data-modal-body]')!
+      body.scrollTop = 127
+      const button = Array.from(surface.querySelectorAll('button')).find(
+        (b) => b.textContent === 'Count 0'
+      )!
+      await act(async () => button.click())
+      for (const small of [true, false, true]) {
+        screen.small = small
+        await render()
+        expect(document.querySelector('[role="dialog"]')).toBe(surface)
+        expect(button.textContent).toBe('Count 1')
+        expect(surface.querySelector('[data-modal-body]')).toBe(body)
+        expect(body.scrollTop).toBe(127)
+        const handle = surface.querySelector('[data-modal-handle]')
+        if (small) {
+          expect(handle?.parentElement).toBe(surface)
+          expect(body.contains(handle)).toBe(false)
+        } else {
+          expect(handle).toBeNull()
+        }
+        expect(surface.getAttribute('data-modal-presentation')).toBe(small ? 'bottom' : 'center')
+      }
+      expect(mounted).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it.each([
+    ['surface', 'surface', 120],
+    ['surface', 'child', 120],
+    ['inner', 'child', 120],
+    ['body', 'body', 120],
+    ['body', 'child', 120],
+    ['body', 'handle', 120],
+    ['surface', 'surface', 0],
+    ['surface', 'child', 0],
+    ['inner', 'child', 0],
+    ['body', 'body', 0],
+    ['body', 'child', 0]
+  ] as const)(
+    'handles downward swipes with %s scrolling, a %s target and scrollTop=%i',
+    async (scrollContainer, touchTarget, scrollTop) => {
+      screen.small = true
+      const changed = vi.fn()
+      await act(async () =>
+        root.render(
+          createElement(
+            Dialog,
+            { open: true, onOpenChange: changed },
+            createElement(
+              DialogContent,
+              { 'aria-describedby': undefined },
+              createElement(
+                'div',
+                { 'data-scroll-body': true },
+                createElement('span', null, 'Content')
+              )
+            )
+          )
+        )
+      )
+      const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+      const inner = surface.querySelector<HTMLElement>('[data-scroll-body]')!
+      const body = surface.querySelector<HTMLElement>('[data-modal-body]')!
+      const scroller =
+        scrollContainer === 'surface' ? surface : scrollContainer === 'body' ? body : inner
+      scroller.style.overflowY = 'auto'
+      Object.defineProperties(scroller, {
+        scrollHeight: { configurable: true, value: 1000 },
+        clientHeight: { configurable: true, value: 400 }
+      })
+      scroller.scrollTop = scrollTop
+      const target =
+        touchTarget === 'surface'
+          ? surface
+          : touchTarget === 'body'
+            ? body
+            : touchTarget === 'handle'
+              ? surface.querySelector<HTMLElement>('[data-modal-handle]')!
+              : inner.querySelector('span')!
+      const touch = (type: string, y: number) => {
+        const event = new Event(type, { bubbles: true, cancelable: true })
+        Object.defineProperties(event, {
+          touches: { value: type === 'touchend' ? [] : [{ clientY: y }] },
+          changedTouches: { value: [{ clientY: y }] }
+        })
+        target.dispatchEvent(event)
+        return event
+      }
+      let move!: Event
+      await act(async () => {
+        touch('touchstart', 100)
+        move = touch('touchmove', 300)
+      })
+      const shouldDismiss = touchTarget === 'handle' || scrollTop === 0
+      expect(move.defaultPrevented).toBe(shouldDismiss)
+      expect(surface.style.transform).toBe(shouldDismiss ? 'translate3d(0, 200px, 0)' : '')
+      await act(async () => {
+        touch('touchend', 300)
+      })
+      if (shouldDismiss) {
+        expect(changed).toHaveBeenCalledExactlyOnceWith(false)
+        expect(surface.style.transform).toBe('')
+      } else expect(changed).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['reach-top', 'reverse-direction'] as const)(
+    'waits for a new swipe before dragging the drawer after content scrolling: %s',
+    async (scenario) => {
+      screen.small = true
+      const changed = vi.fn()
+      await act(async () =>
+        root.render(
+          createElement(
+            Modal,
+            { open: true, onOpenChange: changed },
+            createElement(
+              ModalContent,
+              { 'aria-describedby': undefined },
+              createElement('div', { contentEditable: true })
+            )
+          )
+        )
+      )
+      const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+      const body = surface.querySelector<HTMLElement>('[data-modal-body]')!
+      const target = body.querySelector('[contenteditable]')!
+      body.style.overflowY = 'auto'
+      Object.defineProperties(body, {
+        scrollHeight: { value: 1000 },
+        clientHeight: { value: 400 }
+      })
+      const touch = (type: string, y: number) => {
+        const event = new Event(type, { bubbles: true, cancelable: true })
+        Object.defineProperties(event, {
+          touches: { value: type === 'touchend' ? [] : [{ clientY: y }] },
+          changedTouches: { value: [{ clientY: y }] }
+        })
+        target.dispatchEvent(event)
+        return event
+      }
+      await act(async () => {
+        body.scrollTop = scenario === 'reach-top' ? 120 : 0
+        touch('touchstart', 100)
+        expect(touch('touchmove', scenario === 'reach-top' ? 150 : 50).defaultPrevented).toBe(false)
+        body.scrollTop = 0
+        expect(touch('touchmove', 300).defaultPrevented).toBe(false)
+        expect(surface.style.transform).toBe('')
+        touch('touchend', 300)
+      })
+      expect(changed).not.toHaveBeenCalled()
+      await act(async () => {
+        touch('touchstart', 100)
+        expect(touch('touchmove', 300).defaultPrevented).toBe(true)
+        expect(surface.style.transform).toBe('translate3d(0, 200px, 0)')
+        touch('touchend', 300)
+      })
+      expect(changed).toHaveBeenCalledExactlyOnceWith(false)
+    }
+  )
+
+  it.each(['content', 'editable', 'handle'] as const)(
+    'reserves swipes inside a locked composer for editing while allowing handle dismissal: %s',
+    async (touchTarget) => {
+      screen.small = true
+      const changed = vi.fn()
+      await act(async () =>
+        root.render(
+          createElement(
+            Modal,
+            { open: true, onOpenChange: changed },
+            createElement(
+              ModalContent,
+              { 'aria-describedby': undefined },
+              createElement(
+                'div',
+                { 'data-drawer-swipe-lock': true },
+                createElement('div', { contentEditable: true })
+              )
+            )
+          )
+        )
+      )
+      const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+      const target = surface.querySelector(
+        touchTarget === 'handle'
+          ? '[data-modal-handle]'
+          : touchTarget === 'editable'
+            ? '[contenteditable]'
+            : '[data-drawer-swipe-lock]'
+      )!
+      const touch = (type: string, y: number) => {
+        const event = new Event(type, { bubbles: true, cancelable: true })
+        Object.defineProperties(event, {
+          touches: { value: type === 'touchend' ? [] : [{ clientY: y }] },
+          changedTouches: { value: [{ clientY: y }] }
+        })
+        target.dispatchEvent(event)
+        return event
+      }
+      let move!: Event
+      await act(async () => {
+        touch('touchstart', 100)
+        move = touch('touchmove', 300)
+      })
+      const shouldDrag = touchTarget === 'handle'
+      expect(move.defaultPrevented).toBe(shouldDrag)
+      expect(surface.style.transform).toBe(shouldDrag ? 'translate3d(0, 200px, 0)' : '')
+      await act(async () => {
+        touch('touchend', 300)
+      })
+      if (shouldDrag) expect(changed).toHaveBeenCalledExactlyOnceWith(false)
+      else expect(changed).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    'dismiss',
+    'snap-back',
+    'blur',
+    'button',
+    'locked',
+    'scrolled',
+    'right-button',
+    'center'
+  ])('handles mouse dragging: %s', async (scenario) => {
+    screen.small = scenario !== 'center'
+    const changed = vi.fn()
+    await act(async () =>
+      root.render(
+        createElement(
+          Modal,
+          { open: true, onOpenChange: changed },
+          createElement(
+            ModalContent,
+            { 'aria-describedby': undefined },
+            createElement('button', null, 'Action'),
+            createElement('div', { 'data-drawer-swipe-lock': true }, 'Locked')
+          )
+        )
+      )
+    )
+    const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+    const body = surface.querySelector<HTMLElement>('[data-modal-body]')!
+    const target =
+      scenario === 'button'
+        ? body.querySelector('button')!
+        : scenario === 'locked'
+          ? body.querySelector('[data-drawer-swipe-lock]')!
+          : scenario === 'scrolled'
+            ? body
+            : (surface.querySelector('[data-modal-handle]') ?? surface)
+    if (scenario === 'scrolled') {
+      body.style.overflowY = 'auto'
+      Object.defineProperties(body, {
+        scrollHeight: { value: 1000 },
+        clientHeight: { value: 400 }
+      })
+      body.scrollTop = 100
+    }
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const y = scenario === 'snap-back' ? 130 : 300
+    const shouldDrag = ['dismiss', 'snap-back', 'blur'].includes(scenario)
+    await act(async () => {
+      target.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+          clientY: 100,
+          button: scenario === 'right-button' ? 2 : 0
+        })
+      )
+      now = 1000
+      // Continue outside the drawer, as a real mouse drag often does.
+      document.dispatchEvent(
+        new MouseEvent('mousemove', {
+          bubbles: true,
+          cancelable: true,
+          clientY: y,
+          buttons: 1
+        })
+      )
+    })
+    expect(surface.style.transform).toBe(shouldDrag ? `translate3d(0, ${y - 100}px, 0)` : '')
+    await act(async () => {
+      if (scenario === 'blur') window.dispatchEvent(new Event('blur'))
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientY: y }))
+    })
+    if (scenario === 'dismiss') {
+      expect(changed).toHaveBeenCalledExactlyOnceWith(false)
+      expect(surface.style.transform).toBe('')
+    } else {
+      expect(surface.style.transform).toBe('')
+      expect(changed).not.toHaveBeenCalled()
+    }
+    vi.restoreAllMocks()
+  })
+
+  it('preserves the drag offset while requesting an accepted close', async () => {
+    screen.small = true
+    const changed = vi.fn(() => {
+      expect(surface.style.transform).toBe('translate3d(0, 200px, 0)')
+    })
+    await act(async () =>
+      root.render(
+        createElement(
+          Modal,
+          { defaultOpen: true, onOpenChange: changed },
+          createElement(ModalContent, { 'aria-describedby': undefined }, 'Content')
+        )
+      )
+    )
+    const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+    const handle = surface.querySelector('[data-modal-handle]')!
+    await act(async () => {
+      handle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientY: 100 }))
+      document.dispatchEvent(
+        new MouseEvent('mousemove', { bubbles: true, clientY: 300, buttons: 1 })
+      )
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientY: 300 }))
+    })
+    expect(changed).toHaveBeenCalledExactlyOnceWith(false)
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('notifies uncontrolled callers on both trigger open and close', async () => {
+    const changed = vi.fn()
+    await act(async () =>
+      root.render(
+        createElement(
+          Dialog,
+          { onOpenChange: changed },
+          createElement(DialogTrigger, null, 'Open'),
+          createElement(
+            DialogContent,
+            { 'aria-describedby': undefined },
+            createElement(DialogTitle, null, 'Example')
+          )
+        )
+      )
+    )
+    await act(async () => container.querySelector<HTMLButtonElement>('button')!.click())
+    expect(changed).toHaveBeenLastCalledWith(true)
+    const surface = document.querySelector('[role="dialog"]')!
+    const titles = document.querySelectorAll(`[id="${surface.getAttribute('aria-labelledby')}"]`)
+    expect(titles).toHaveLength(1)
+    expect(titles[0].textContent).toBe('Example')
+    const close = Array.from(document.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Close'
+    )!
+    await act(async () => close.click())
+    expect(changed).toHaveBeenLastCalledWith(false)
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(changed.mock.calls).toEqual([[true], [false]])
+  })
+
+  it('clears keyboard avoidance when changing from a sheet to a centered dialog', async () => {
+    screen.small = true
+    const viewport = Object.assign(new EventTarget(), { height: 500, offsetTop: 0 })
+    vi.stubGlobal('visualViewport', viewport)
+    vi.stubGlobal('innerHeight', 800)
+    const render = () =>
+      act(async () =>
+        root.render(
+          createElement(
+            Modal,
+            { open: true },
+            createElement(
+              ModalContent,
+              { title: 'Input', 'aria-describedby': undefined },
+              createElement('input')
+            )
+          )
+        )
+      )
+    await render()
+    const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+    const input = surface.querySelector('input')!
+    vi.spyOn(input, 'getBoundingClientRect').mockReturnValue({ bottom: 600 } as DOMRect)
+    await act(async () => input.focus())
+    expect(surface.style.bottom).toBe('112px')
+    screen.small = false
+    await render()
+    expect(document.querySelector('[role="dialog"]')).toBe(surface)
+    expect(surface.style.bottom).toBe('')
+  })
+
+  it('fits a full-height composer to the keyboard viewport without measuring the whole editable', async () => {
+    screen.small = true
+    const viewport = Object.assign(new EventTarget(), { height: 800, offsetTop: 0 })
+    vi.stubGlobal('visualViewport', viewport)
+    vi.stubGlobal('innerHeight', 800)
+    const render = () =>
+      act(async () =>
+        root.render(
+          createElement(
+            Modal,
+            { open: true },
+            createElement(
+              ModalContent,
+              { fitVisualViewport: true, title: 'Composer', 'aria-describedby': undefined },
+              createElement('div', { contentEditable: true, suppressContentEditableWarning: true })
+            )
+          )
+        )
+      )
+    await render()
+    const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+    const editable = surface.querySelector<HTMLElement>('[contenteditable]')!
+    const measure = vi.spyOn(editable, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 1500
+    } as DOMRect)
+    await act(async () => editable.focus())
+    viewport.height = 500
+    await act(async () => viewport.dispatchEvent(new Event('resize')))
+    expect(surface.style.top).toBe('0px')
+    expect(surface.style.bottom).toBe('auto')
+    expect(surface.style.height).toBe('500px')
+    expect(surface.style.maxHeight).toBe('500px')
+    expect(surface.style.paddingBottom).toBe('0px')
+    // Repeated resize/scroll events must not alternate between lifting and
+    // resetting based on an already-shifted editable's bounding box.
+    viewport.offsetTop = 40
+    await act(async () => viewport.dispatchEvent(new Event('scroll')))
+    expect(surface.style.top).toBe('40px')
+    expect(surface.style.bottom).toBe('auto')
+    expect(surface.style.height).toBe('500px')
+    expect(surface.style.maxHeight).toBe('500px')
+    expect(measure).not.toHaveBeenCalled()
+    // Browser chrome can change innerHeight independently of the viewport.
+    // The composer's lower edge must still be offsetTop + viewport.height.
+    vi.stubGlobal('innerHeight', 900)
+    await act(async () => window.dispatchEvent(new Event('resize')))
+    expect(surface.style.top).toBe('40px')
+    expect(surface.style.height).toBe('500px')
+    expect(surface.style.bottom).toBe('auto')
+    vi.stubGlobal('innerHeight', 800)
+    viewport.height = 800
+    viewport.offsetTop = 0
+    await act(async () => viewport.dispatchEvent(new Event('resize')))
+    expect(surface.style.top).toBe('0px')
+    expect(surface.style.bottom).toBe('auto')
+    expect(surface.style.height).toBe('800px')
+    expect(surface.style.maxHeight).toBe('800px')
+    expect(surface.style.paddingBottom).toBe('')
+    screen.small = false
+    await render()
+    expect(document.querySelector('[role="dialog"]')).toBe(surface)
+    expect(surface.style.bottom).toBe('')
+    expect(surface.style.top).toBe('')
+    expect(surface.style.height).toBe('')
+    expect(surface.style.maxHeight).toBe('')
+    expect(surface.style.paddingBottom).toBe('')
+    measure.mockRestore()
+  })
+
+  it('uses the resized layout viewport on Android Chrome and restores the viewport meta on close', async () => {
+    screen.small = true
+    const viewport = Object.assign(new EventTarget(), { height: 800, offsetTop: 0 })
+    vi.stubGlobal('visualViewport', viewport)
+    vi.stubGlobal('innerHeight', 800)
+    const userAgent = vi
+      .spyOn(navigator, 'userAgent', 'get')
+      .mockReturnValue(
+        'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/142.0.0.0 Mobile Safari/537.36'
+      )
+    const meta = document.createElement('meta')
+    meta.name = 'viewport'
+    meta.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover'
+    const originalContent = meta.content
+    document.head.appendChild(meta)
+    try {
+      await act(async () =>
+        root.render(
+          createElement(
+            Modal,
+            { open: true },
+            createElement(ModalContent, {
+              fitVisualViewport: true,
+              title: 'Composer',
+              'aria-describedby': undefined
+            })
+          )
+        )
+      )
+      const surface = document.querySelector<HTMLElement>('[role="dialog"]')!
+      expect(meta.content).toBe(`${originalContent}, interactive-widget=resizes-content`)
+      // The keyboard resizes the layout viewport to 500px. A visual viewport
+      // that excludes an additional browser bar must not shorten the sheet.
+      vi.stubGlobal('innerHeight', 500)
+      viewport.height = 476
+      await act(async () => window.dispatchEvent(new Event('resize')))
+      expect(surface.style.top).toBe('0px')
+      expect(surface.style.bottom).toBe('0px')
+      expect(surface.style.height).toBe('100%')
+      expect(surface.style.maxHeight).toBe('100%')
+      expect(surface.style.paddingBottom).toBe('0px')
+      vi.stubGlobal('innerHeight', 800)
+      await act(async () => window.dispatchEvent(new Event('resize')))
+      expect(surface.style.paddingBottom).toBe('')
+      await act(async () => root.render(null))
+      expect(meta.content).toBe(originalContent)
+    } finally {
+      meta.remove()
+      userAgent.mockRestore()
+    }
+  })
+
+  it('advances from a prompt to a queued confirmation without a stale close cancelling it', async () => {
+    screen.small = true
+    const named = dialogService.prompt('Name', 'My relays')
+    const confirmed = dialogService.confirm('Continue?')
+    await act(async () => root.render(createElement(DialogHost)))
+    expect(document.querySelector<HTMLInputElement>('input')!.value).toBe('My relays')
+    await act(async () => {
+      document
+        .querySelector('form')!
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await expect(named).resolves.toBe('My relays')
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('Continue?')
+    const cancel = Array.from(document.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Cancel'
+    )!
+    await act(async () => cancel.click())
+    await expect(confirmed).resolves.toBe(false)
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+  })
+
+  it('retains an explicitly anchored navigation sheet', async () => {
+    await act(async () =>
+      root.render(
+        createElement(
+          Modal,
+          { open: true, direction: 'left' },
+          createElement(
+            ModalContent,
+            { title: 'Navigation', 'aria-describedby': undefined },
+            'Menu'
+          )
+        )
+      )
+    )
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-modal-presentation')).toBe(
+      'left'
+    )
+  })
+
+  it('keeps alert semantics and cancel focus while adapting to a mobile sheet', async () => {
+    const changed = vi.fn()
+    const confirmed = vi.fn()
+    const render = () =>
+      act(async () =>
+        root.render(
+          createElement(
+            AlertDialog,
+            { defaultOpen: true, onOpenChange: changed },
+            createElement(
+              AlertDialogContent,
+              null,
+              createElement(AlertDialogTitle, null, 'Delete?'),
+              createElement(AlertDialogDescription, null, 'Confirm deletion'),
+              createElement(AlertDialogCancel, null, 'Cancel'),
+              createElement(AlertDialogAction, { onClick: confirmed }, 'Delete')
+            )
+          )
+        )
+      )
+    await render()
+    const surface = document.querySelector('[role="alertdialog"]')!
+    const cancel = Array.from(surface.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Cancel'
+    )!
+    expect(document.activeElement).toBe(cancel)
+    screen.small = true
+    await render()
+    expect(document.querySelector('[role="alertdialog"]')).toBe(surface)
+    expect(surface.getAttribute('data-modal-presentation')).toBe('bottom')
+    await act(async () =>
+      document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    )
+    expect(document.querySelector('[role="alertdialog"]')).toBe(surface)
+    expect(changed).not.toHaveBeenCalled()
+    await act(async () => cancel.click())
+    expect(changed).toHaveBeenLastCalledWith(false)
+    expect(changed.mock.calls).toEqual([[false]])
+    expect(confirmed).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+  })
+})

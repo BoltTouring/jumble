@@ -43,6 +43,16 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
         return
       }
 
+      const currentFeedInfo = feedInfoRef.current
+      if (currentFeedInfo) {
+        if (currentFeedInfo.feedType !== 'following' && currentFeedInfo.feedType !== 'pinned') {
+          return
+        }
+        return pubkey
+          ? await switchFeed(currentFeedInfo.feedType, { pubkey })
+          : await switchFeed(null)
+      }
+
       let feedInfo: TFeedInfo = null
       if (pubkey) {
         const storedFeedInfo = storage.getFeedInfo(pubkey)
@@ -122,7 +132,7 @@ export function FeedProvider({ children }: { children: React.ReactNode }) {
     }
     if (feedType === 'relays') {
       const relaySetId = options.activeRelaySetId ?? (relaySets.length > 0 ? relaySets[0].id : null)
-      let relaySet: TRelaySet | null = null
+      let relaySet: TRelaySet | null
       if (IS_COMMUNITY_MODE) {
         relaySet =
           COMMUNITY_RELAY_SETS.find((set) => set.id === relaySetId) ??

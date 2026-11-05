@@ -1,17 +1,25 @@
 import { useTranslatedEvent } from '@/hooks'
+import { useWebPreviewPolicy } from '@/hooks/useWebPreviewPolicy'
 import {
+  EmbeddedBareDomainParser,
   EmbeddedEmojiParser,
   EmbeddedEventParser,
   EmbeddedHashtagParser,
   EmbeddedLNInvoiceParser,
+  EmbeddedLegacyEventParser,
+  EmbeddedLegacyMentionParser,
   EmbeddedMentionParser,
   EmbeddedUrlParser,
   EmbeddedWebsocketUrlParser,
-  parseContent
+  parseContent,
+  TEmbeddedNode
 } from '@/lib/content-parser'
 import { getImetaInfosFromEvent } from '@/lib/event'
+import { containsMarkdown } from '@/lib/markdown'
 import { getEmojiInfosFromEmojiTags, getImetaInfoFromImetaTag } from '@/lib/tag'
+import { EMOJI_REGEX } from '@/constants'
 import { cn } from '@/lib/utils'
+import { useContentPolicy } from '@/providers/ContentPolicyProvider'
 import mediaUpload from '@/services/media-upload.service'
 import { TImetaInfo } from '@/types'
 import { Event } from 'nostr-tools'
@@ -25,34 +33,49 @@ import {
 } from '../Embedded'
 import Emoji from '../Emoji'
 import ExternalLink from '../ExternalLink'
+import HiddenMediaBar from '../HiddenMediaBar'
 import HighlightButton from '../HighlightButton'
 import ImageGallery from '../ImageGallery'
+import MarkdownContent from '../MarkdownContent'
 import MediaPlayer from '../MediaPlayer'
 import PostEditor from '../PostEditor'
 import WebPreview from '../WebPreview'
 import XEmbeddedPost from '../XEmbeddedPost'
 import YoutubeEmbeddedPlayer from '../YoutubeEmbeddedPlayer'
+import ReadOnly from './ReadOnly'
+import { insertParagraphLinkPreviews } from './link-previews'
+import { CONTENT_LAYOUT_CLASS_NAME, groupContentNodes, isMediaContentNode } from './node-layout'
 
 export default function Content({
   event,
   content,
   className,
   mustLoadMedia,
-  enableHighlight = false
+  enableHighlight = false,
+  preview = false
 }: {
   event?: Event
   content?: string
   className?: string
   mustLoadMedia?: boolean
   enableHighlight?: boolean
+  preview?: boolean
 }) {
   const contentRef = useRef<HTMLDivElement>(null)
   const [showHighlightEditor, setShowHighlightEditor] = useState(false)
   const [selectedText, setSelectedText] = useState('')
+  const [mediaRevealed, setMediaRevealed] = useState(false)
+  const { autoLoadMedia } = useContentPolicy()
+  const canShowPreview = useWebPreviewPolicy()
   const translatedEvent = useTranslatedEvent(event?.id)
-  const { nodes, allImages, lastNormalUrl, emojiInfos } = useMemo(() => {
-    const _content = translatedEvent?.content ?? event?.content ?? content
-    if (!_content) return {}
+  const resolvedContent = translatedEvent?.content ?? event?.content ?? content
+  const isMarkdown = useMemo(
+    () => (resolvedContent ? containsMarkdown(resolvedContent) : false),
+    [resolvedContent]
+  )
+  const { nodes, allImages, emojiInfos, hiddenMediaCount, imetaInfos } = useMemo(() => {
+    if (!resolvedContent || isMarkdown) return {}
+    const _content = resolvedContent
 
     const nodes = parseContent(_content, [
       EmbeddedEventParser,
@@ -60,8 +83,11 @@ export default function Content({
       EmbeddedUrlParser,
       EmbeddedLNInvoiceParser,
       EmbeddedWebsocketUrlParser,
+      EmbeddedLegacyEventParser,
+      EmbeddedLegacyMentionParser,
       EmbeddedHashtagParser,
-      EmbeddedEmojiParser
+      EmbeddedEmojiParser,
+      EmbeddedBareDomainParser
     ])
 
     const imetaInfos = event ? getImetaInfosFromEvent(event) : []
@@ -91,98 +117,218 @@ export default function Content({
 
     const emojiInfos = getEmojiInfosFromEmojiTags(event?.tags)
 
-    const lastNormalUrlNode = nodes.findLast((node) => node.type === 'url')
-    const lastNormalUrl =
-      typeof lastNormalUrlNode?.data === 'string' ? lastNormalUrlNode.data : undefined
+    let hiddenMediaCount = 0
+    for (const node of nodes) {
+      if (isMediaContentNode(node)) {
+        hiddenMediaCount += Array.isArray(node.data) ? node.data.length : 1
+      }
+    }
 
-    return { nodes, allImages, emojiInfos, lastNormalUrl }
-  }, [event, translatedEvent, content])
+    return {
+      nodes: insertParagraphLinkPreviews(nodes),
+      allImages,
+      emojiInfos,
+      hiddenMediaCount,
+      imetaInfos
+    }
+  }, [event, resolvedContent, isMarkdown])
 
-  if (!nodes || nodes.length === 0) {
-    return null
-  }
+  const isEmojiOnly = useMemo(() => {
+    if (!nodes || nodes.length === 0) return false
+    const nonWhitespace = nodes.filter((node) => !(node.type === 'text' && /^\s*$/.test(node.data)))
+    let emojiCount = 0
+    for (const node of nonWhitespace) {
+      if (node.type === 'emoji') {
+        emojiCount++
+      } else if (node.type === 'text') {
+        const matches = node.data.match(new RegExp(EMOJI_REGEX.source, 'gu'))
+        if (!matches || node.data.replace(new RegExp(EMOJI_REGEX.source, 'gu'), '').trim() !== '') {
+          return false
+        }
+        emojiCount += matches.length
+      } else {
+        return false
+      }
+    }
+    return emojiCount > 0 && emojiCount <= 3
+  }, [nodes])
 
   const handleHighlight = (text: string) => {
     setSelectedText(text)
     setShowHighlightEditor(true)
   }
 
+  if (!resolvedContent) {
+    return null
+  }
+
+  if (isMarkdown) {
+    return (
+      <>
+        <div ref={contentRef} dir="auto" className={cn('text-wrap wrap-break-word', className)}>
+          {preview ? (
+            <ReadOnly>
+              <MarkdownContent content={resolvedContent} event={event} />
+            </ReadOnly>
+          ) : (
+            <MarkdownContent content={resolvedContent} event={event} />
+          )}
+        </div>
+        {enableHighlight && (
+          <HighlightButton onHighlight={handleHighlight} containerRef={contentRef} />
+        )}
+        {enableHighlight && (
+          <PostEditor
+            highlightedText={selectedText}
+            parentStuff={event}
+            open={showHighlightEditor}
+            setOpen={setShowHighlightEditor}
+          />
+        )}
+      </>
+    )
+  }
+
+  if (!nodes || nodes.length === 0) {
+    return null
+  }
+
+  const effectiveMustLoad = !!mustLoadMedia || mediaRevealed
+  const mediaHidden = !effectiveMustLoad && !autoLoadMedia
+  const groups = groupContentNodes(
+    nodes.filter((node) => {
+      if (mediaHidden && isMediaContentNode(node)) return false
+      if (node.type === 'web-preview') return canShowPreview(node.data)
+      return true
+    })
+  )
   let imageIndex = 0
+  const renderNode = (node: TEmbeddedNode, index: string) => {
+    if (node.type === 'web-preview') {
+      return <WebPreview url={node.data} key={index} />
+    }
+    if (node.type === 'text') {
+      if (!node.data) return null
+      if (isEmojiOnly) {
+        return (
+          <span key={index} className="text-7xl leading-none">
+            {node.data}
+          </span>
+        )
+      }
+      return <span key={index}>{node.data}</span>
+    }
+    if (node.type === 'image' || node.type === 'images') {
+      const start = imageIndex
+      const end = imageIndex + (Array.isArray(node.data) ? node.data.length : 1)
+      imageIndex = end
+      return (
+        <ImageGallery
+          key={index}
+          images={allImages}
+          start={start}
+          end={end}
+          mustLoad={effectiveMustLoad}
+          enableLightbox={!preview}
+        />
+      )
+    }
+    if (node.type === 'media') {
+      const mediaInfo = imetaInfos?.find((info) => info.url === node.data)
+      return (
+        <MediaPlayer
+          key={index}
+          src={node.data}
+          pubkey={mediaInfo?.pubkey ?? event?.pubkey}
+          mustLoad={effectiveMustLoad}
+          dim={mediaInfo?.dim}
+        />
+      )
+    }
+    if (node.type === 'url') {
+      return <ExternalLink url={node.data} key={index} />
+    }
+    if (node.type === 'bare-url') {
+      return (
+        <ExternalLink url={`https://${node.data}`} key={index}>
+          {node.data}
+        </ExternalLink>
+      )
+    }
+    if (node.type === 'invoice') {
+      return <EmbeddedLNInvoice invoice={node.data} key={index} />
+    }
+    if (node.type === 'websocket-url') {
+      return <EmbeddedWebsocketUrl url={node.data} key={index} />
+    }
+    if (node.type === 'event') {
+      const id = node.data.split(':')[1]
+      return <EmbeddedNote key={index} noteId={id} />
+    }
+    if (node.type === 'mention') {
+      return <EmbeddedMention key={index} userId={node.data.split(':')[1]} />
+    }
+    if (node.type === 'hashtag') {
+      return <EmbeddedHashtag hashtag={node.data} key={index} />
+    }
+    if (node.type === 'emoji') {
+      const shortcode = node.data.split(':')[1]
+      const emoji = emojiInfos.find((e) => e.shortcode === shortcode)
+      if (!emoji) return <span key={index}>{node.data}</span>
+      return (
+        <Emoji
+          classNames={{ img: isEmojiOnly ? 'size-20' : 'mb-1' }}
+          emoji={emoji}
+          clickable
+          key={index}
+        />
+      )
+    }
+    if (node.type === 'youtube') {
+      return <YoutubeEmbeddedPlayer key={index} url={node.data} mustLoad={effectiveMustLoad} />
+    }
+    if (node.type === 'x-post') {
+      return <XEmbeddedPost key={index} url={node.data} mustLoad={effectiveMustLoad} />
+    }
+    return null
+  }
+  // Preview text stays selectable; only galleries retain interactive controls.
+  const renderPreviewNode = (node: TEmbeddedNode, index: string) => {
+    const rendered = renderNode(node, index)
+    if (!preview || node.type === 'text' || node.type === 'image' || node.type === 'images') {
+      return rendered
+    }
+    return <ReadOnly key={index}>{rendered}</ReadOnly>
+  }
   return (
     <>
-      <div ref={contentRef} className={cn('whitespace-pre-wrap text-wrap break-words', className)}>
-        {nodes.map((node, index) => {
-          if (node.type === 'text') {
-            return node.data
-          }
-          if (node.type === 'image' || node.type === 'images') {
-            const start = imageIndex
-            const end = imageIndex + (Array.isArray(node.data) ? node.data.length : 1)
-            imageIndex = end
-            return (
-              <ImageGallery
-                className="mt-2"
-                key={index}
-                images={allImages}
-                start={start}
-                end={end}
-                mustLoad={mustLoadMedia}
-              />
-            )
-          }
-          if (node.type === 'media') {
-            return (
-              <MediaPlayer className="mt-2" key={index} src={node.data} mustLoad={mustLoadMedia} />
-            )
-          }
-          if (node.type === 'url') {
-            return <ExternalLink url={node.data} key={index} />
-          }
-          if (node.type === 'invoice') {
-            return <EmbeddedLNInvoice invoice={node.data} key={index} className="mt-2" />
-          }
-          if (node.type === 'websocket-url') {
-            return <EmbeddedWebsocketUrl url={node.data} key={index} />
-          }
-          if (node.type === 'event') {
-            const id = node.data.split(':')[1]
-            return <EmbeddedNote key={index} noteId={id} className="mt-2" />
-          }
-          if (node.type === 'mention') {
-            return <EmbeddedMention key={index} userId={node.data.split(':')[1]} />
-          }
-          if (node.type === 'hashtag') {
-            return <EmbeddedHashtag hashtag={node.data} key={index} />
-          }
-          if (node.type === 'emoji') {
-            const shortcode = node.data.split(':')[1]
-            const emoji = emojiInfos.find((e) => e.shortcode === shortcode)
-            if (!emoji) return node.data
-            return <Emoji classNames={{ img: 'mb-1' }} emoji={emoji} key={index} />
-          }
-          if (node.type === 'youtube') {
-            return (
-              <YoutubeEmbeddedPlayer
-                key={index}
-                url={node.data}
-                className="mt-2"
-                mustLoad={mustLoadMedia}
-              />
-            )
-          }
-          if (node.type === 'x-post') {
-            return (
-              <XEmbeddedPost
-                key={index}
-                url={node.data}
-                className="mt-2"
-                mustLoad={mustLoadMedia}
-              />
-            )
-          }
-          return null
-        })}
-        {lastNormalUrl && <WebPreview className="mt-2" url={lastNormalUrl} />}
+      <div
+        ref={contentRef}
+        dir="auto"
+        className={cn('text-wrap wrap-break-word', CONTENT_LAYOUT_CLASS_NAME, className)}
+      >
+        {groups.map((group, index) =>
+          group.type === 'block' ? (
+            renderPreviewNode(group.node, String(index))
+          ) : (
+            <div
+              key={index}
+              dir="auto"
+              className={cn('whitespace-pre-wrap', isEmojiOnly && 'flex items-end gap-1')}
+            >
+              {group.nodes.map((node, nodeIndex) =>
+                renderPreviewNode(node, `${index}-${nodeIndex}`)
+              )}
+            </div>
+          )
+        )}
+        {mediaHidden && hiddenMediaCount > 0 && (
+          <HiddenMediaBar
+            className="mt-0"
+            count={hiddenMediaCount}
+            onClick={() => setMediaRevealed(true)}
+          />
+        )}
       </div>
       {enableHighlight && (
         <HighlightButton onHighlight={handleHighlight} containerRef={contentRef} />

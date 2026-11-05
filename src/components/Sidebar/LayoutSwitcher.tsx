@@ -3,7 +3,13 @@ import { cn } from '@/lib/utils'
 import { useUserPreferences } from '@/providers/UserPreferencesProvider'
 import { Columns2, PanelLeft } from 'lucide-react'
 
-export default function LayoutSwitcher({ collapse }: { collapse: boolean }) {
+export default function LayoutSwitcher({
+  collapse,
+  disabled = false
+}: {
+  collapse: boolean
+  disabled?: boolean
+}) {
   const { enableSingleColumnLayout, updateEnableSingleColumnLayout } = useUserPreferences()
 
   if (collapse) {
@@ -11,19 +17,25 @@ export default function LayoutSwitcher({ collapse }: { collapse: boolean }) {
       <Button
         variant="ghost"
         className="size-12 hover:border"
+        disabled={disabled}
         onClick={() => updateEnableSingleColumnLayout(!enableSingleColumnLayout)}
       >
         {enableSingleColumnLayout ? (
-          <PanelLeft className="!size-5" />
+          <PanelLeft className="size-5!" />
         ) : (
-          <Columns2 className="!size-5" />
+          <Columns2 className="size-5!" />
         )}
       </Button>
     )
   }
 
   return (
-    <div className="rounded-lg bg-muted p-1 shadow-inner">
+    <div
+      className={cn(
+        'rounded-lg bg-muted p-1 shadow-inner',
+        disabled && 'pointer-events-none opacity-50'
+      )}
+    >
       <div className="relative flex items-center justify-around">
         <div
           className="z-10 flex w-full cursor-pointer flex-col items-center py-1"
@@ -41,10 +53,10 @@ export default function LayoutSwitcher({ collapse }: { collapse: boolean }) {
         </div>
         <div
           className={cn(
-            'absolute inset-0 left-0 top-0 h-full w-1/2 rounded-md shadow-sm transition-transform',
+            'absolute inset-0 start-0 top-0 h-full w-1/2 rounded-md shadow-xs transition-transform',
             !enableSingleColumnLayout
               ? 'translate-x-0 bg-surface-background'
-              : 'translate-x-full bg-background'
+              : 'translate-x-full rtl:-translate-x-full bg-background'
           )}
         />
       </div>

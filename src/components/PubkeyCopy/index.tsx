@@ -1,3 +1,4 @@
+import { copyText } from '@/lib/native-system'
 import { formatNpub } from '@/lib/pubkey'
 import { Check, Copy } from 'lucide-react'
 import { nip19 } from 'nostr-tools'
@@ -10,14 +11,14 @@ export default function PubkeyCopy({ pubkey }: { pubkey: string }) {
   const copyNpub = () => {
     if (!npub) return
 
-    navigator.clipboard.writeText(npub)
+    copyText(npub)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
   return (
     <div
-      className="clickable flex w-fit items-center gap-2 rounded-full bg-muted px-2 text-sm text-muted-foreground"
+      className="clickable bg-muted text-muted-foreground flex w-fit items-center gap-2 rounded-full px-2 text-sm"
       onClick={() => copyNpub()}
     >
       <div>{formatNpub(npub, 24)}</div>

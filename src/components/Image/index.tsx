@@ -1,21 +1,14 @@
 import { Skeleton } from '@/components/ui/skeleton'
+import { useBlossomUrl } from '@/hooks/useBlossomUrl'
 import { cn } from '@/lib/utils'
-import blossomService from '@/services/blossom.service'
 import { TImetaInfo } from '@/types'
 import { decode } from 'blurhash'
 import { ImageOff } from 'lucide-react'
 import { HTMLAttributes, useEffect, useMemo, useRef, useState } from 'react'
 import { thumbHashToDataURL } from 'thumbhash'
+import { ImageSize, isSmallInlineImage, isValidImageSize, shouldFillImageRow } from './display-size'
 
-export default function Image({
-  image: { url, blurHash, thumbHash, pubkey, dim },
-  alt,
-  className = '',
-  classNames = {},
-  hideIfError = false,
-  errorPlaceholder = <ImageOff />,
-  ...props
-}: HTMLAttributes<HTMLDivElement> & {
+type ImageProps = HTMLAttributes<HTMLDivElement> & {
   classNames?: {
     wrapper?: string
     errorPlaceholder?: string
@@ -25,62 +18,88 @@ export default function Image({
   alt?: string
   hideIfError?: boolean
   errorPlaceholder?: React.ReactNode
-}) {
-  const [isLoading, setIsLoading] = useState(true)
+  onImageLoad?: (url: string, img: HTMLImageElement) => void
+  upscaleSmall?: boolean
+  fillNearRow?: boolean
+}
+
+export default function Image(props: ImageProps) {
+  // Reset loading state by source without a passive effect that can overwrite
+  // an already-fired load event for cached images.
+  return <ImageContent key={props.image.url} {...props} />
+}
+
+function ImageContent({
+  image: { url, blurHash, thumbHash, pubkey, dim },
+  alt,
+  className = '',
+  classNames = {},
+  hideIfError = false,
+  errorPlaceholder = <ImageOff />,
+  onImageLoad,
+  upscaleSmall = false,
+  fillNearRow = false,
+  ...props
+}: ImageProps) {
+  const { url: imageUrl, error: hasError, handleError, markSuccess } = useBlossomUrl(url, pubkey)
+  const [isLoaded, setIsLoaded] = useState(false)
   const [displaySkeleton, setDisplaySkeleton] = useState(true)
-  const [hasError, setHasError] = useState(false)
-  const [imageUrl, setImageUrl] = useState<string>()
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const [loadedSize, setLoadedSize] = useState<(ImageSize & { url: string }) | null>(null)
+  const size = isValidImageSize(dim) ? dim : loadedSize?.url === url ? loadedSize : undefined
+  const small = upscaleSmall && isSmallInlineImage(size)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const [rowWidth, setRowWidth] = useState(0)
+  const fillRow = fillNearRow && shouldFillImageRow(size, rowWidth)
+  const sizeDisplay = small || fillRow
 
   useEffect(() => {
-    setIsLoading(true)
-    setHasError(false)
-    setDisplaySkeleton(true)
-
-    if (pubkey) {
-      blossomService.getValidUrl(url, pubkey).then((validUrl) => {
-        setImageUrl(validUrl)
-        if (timeoutRef.current) {
-          clearTimeout(timeoutRef.current)
-          timeoutRef.current = null
-        }
-      })
-      timeoutRef.current = setTimeout(() => {
-        setImageUrl(url)
-      }, 5000)
-    } else {
-      setImageUrl(url)
-    }
-  }, [url])
+    const parent = wrapperRef.current?.parentElement
+    if (!fillNearRow || !parent) return
+    const observer = new ResizeObserver(([entry]) => setRowWidth(entry.contentRect.width))
+    observer.observe(parent)
+    return () => observer.disconnect()
+  }, [fillNearRow])
 
   if (hideIfError && hasError) return null
 
-  const handleError = async () => {
-    const nextUrl = await blossomService.tryNextUrl(url)
-    if (nextUrl) {
-      setImageUrl(nextUrl)
-    } else {
-      setIsLoading(false)
-      setHasError(true)
-    }
-  }
+  const isLoading = !isLoaded && !hasError
 
-  const handleLoad = () => {
-    setIsLoading(false)
-    setHasError(false)
+  const handleLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = event.currentTarget
+    setLoadedSize({ url, width: img.naturalWidth, height: img.naturalHeight })
+    setIsLoaded(true)
     setTimeout(() => setDisplaySkeleton(false), 600)
-    blossomService.markAsSuccess(url, imageUrl || url)
+    markSuccess()
+    if (imageUrl) onImageLoad?.(imageUrl, img)
   }
 
   return (
-    <div className={cn('relative overflow-hidden rounded-xl', classNames.wrapper)} {...props}>
+    <div
+      {...props}
+      ref={wrapperRef}
+      className={cn(
+        'relative overflow-hidden rounded-xl',
+        classNames.wrapper,
+        sizeDisplay && 'w-full max-w-full [--image-max-height:80vh] sm:[--image-max-height:50vh]',
+        small && !fillRow && 'max-w-[480px]'
+      )}
+      style={
+        sizeDisplay && size
+          ? {
+              ...props.style,
+              width: `min(${fillRow ? '' : '480px, '}100%, calc(var(--image-max-height) * ${size.width / size.height}))`
+            }
+          : props.style
+      }
+    >
       {/* Spacer: transparent image to maintain dimensions when image is loading */}
       {isLoading && dim?.width && dim?.height && (
         <img
           src={`data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='${dim.width}' height='${dim.height}'%3E%3C/svg%3E`}
           className={cn(
             'pointer-events-none h-full w-full object-cover transition-opacity',
-            className
+            className,
+            sizeDisplay && 'h-auto'
           )}
           alt=""
         />
@@ -121,12 +140,15 @@ export default function Image({
           decoding="async"
           draggable={false}
           {...props}
+          role={undefined}
+          tabIndex={undefined}
           onLoad={handleLoad}
           onError={handleError}
           className={cn(
             'pointer-events-none h-full w-full object-cover transition-opacity',
             isLoading ? 'absolute inset-0 opacity-0' : '',
-            className
+            className,
+            sizeDisplay && 'h-auto'
           )}
         />
       )}
@@ -142,7 +164,7 @@ export default function Image({
         ) : (
           <div
             className={cn(
-              'flex h-full w-full flex-col items-center justify-center bg-muted object-cover',
+              'bg-muted flex h-full w-full flex-col items-center justify-center object-cover',
               className,
               classNames.errorPlaceholder
             )}
