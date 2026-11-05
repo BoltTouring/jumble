@@ -113,7 +113,6 @@ const ProfileEditorPage = forwardRef(({ index }: { index?: number }, ref) => {
     }
 
     setSaving(true)
-    setHasChanged(false)
     const profileDraftEvent = createProfileDraftEvent(
       JSON.stringify(newProfileContent),
       profileEvent?.tags
@@ -121,13 +120,15 @@ const ProfileEditorPage = forwardRef(({ index }: { index?: number }, ref) => {
     try {
       const newProfileEvent = await publish(profileDraftEvent)
       await updateProfileEvent(newProfileEvent)
-      setSaving(false)
+      setHasChanged(false)
       pop()
     } catch (error) {
       const errors = formatError(error)
       errors.forEach((err) => {
         toast.error(`${t('Failed to save profile')}: ${err}`, { duration: 10_000 })
       })
+    } finally {
+      setSaving(false)
     }
   }
 
